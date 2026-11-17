@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 import 'package:novel_app/screens/story_detail_screen.dart';
 import 'package:novel_app/services/last_read.dart';
 import 'package:novel_app/services/reading_list.dart';
@@ -22,7 +23,6 @@ import '../services/chapter_image_prefetcher.dart';
 import '../services/comment_service.dart';
 import '../services/story_fetcher.dart';
 import '../widget/sequential_chapter_image.dart';
-
 abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     extends State<T> {
   final ScrollController scrollController = ScrollController();
@@ -30,16 +30,16 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
   final PageController _pageController = PageController();
   bool _isJumpingToInitialPage = false;
   int _jumpToImageRequestId = 0;
-  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+  final GlobalKey<ScaffoldState> _scaffoldKey =
+  GlobalKey<ScaffoldState>();
   final GlobalKey _listViewKey = GlobalKey();
   final GlobalKey _readerViewportKey = GlobalKey();
   final FocusNode _keyboardFocusNode = FocusNode();
   final TransformationController transformController =
-      TransformationController();
-
+  TransformationController();
   // Windows continuous mode: toàn bộ chương được biến đổi như một canvas.
   final TransformationController _windowsCanvasController =
-      TransformationController();
+  TransformationController();
   final GlobalKey _windowsCanvasKey = GlobalKey();
   bool _mobileZoomed = false;
   final Set<int> _activePointers = <int>{};
@@ -53,15 +53,19 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
   List<int> _imageIndexByBlockIndex = [];
   List<int> _imageBlockIndexes = [];
   List<GlobalKey> _imageKeys = [];
+  // Neo trang đang đọc trong viewport khi ảnh phía trước tải xong và đổi chiều cao.
+  // Scroll offset sẽ được bù tương ứng để trang neo không bị đẩy xuống.
+  int? _scrollAnchorImageIndex;
+  int _scrollAnchorChapterId = 0;
+  double _scrollAnchorViewportOffset = 0.0;
+  bool _scrollAnchorAlignBottom = false;
+  bool _scrollAnchorCorrectionScheduled = false;
   final Set<int> _finishedInitialImageIndexes = {};
-
   // Cache ảnh trong RAM cho toàn bộ chương đang xem để khi lùi lại trang
   // trong cùng một màn hình đọc không phải tải lại từ mạng/dĩa.
   final Map<String, ImageProvider> _memoryImageCache = {};
-
   // Tăng mỗi khi mở chương mới hoặc rời màn hình để hủy prefetch cũ.
   int _prefetchGeneration = 0;
-
   // Debounce lưu tiến độ trang: chờ người đọc dừng vuốt mới gửi lên server.
   Timer? _pageSaveDebounceTimer;
   bool _isCtrlZooming = false;
@@ -78,12 +82,12 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
   bool allowRemainingImages = false;
   bool useOfflineImages = false;
   bool loading = true;
-
   // ===== BÌNH LUẬN =====
   List<Map<String, dynamic>> comments = [];
   bool commentLoading = false;
   final TextEditingController commentController = TextEditingController();
   int? replyingToCommentId;
+  int commentCount = 0;
   double zoomScale = 1.0;
   double maxAllowedZoomScale = 2.5;
   double scrollSensitivity = 1.0;
@@ -98,29 +102,29 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
   String source = '';
   bool usePageMode = false;
   bool tapNavigationEnabled = true;
-
   bool get isWindows =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
-
   bool get isMobile =>
       !kIsWeb &&
-      (defaultTargetPlatform == TargetPlatform.android ||
-          defaultTargetPlatform == TargetPlatform.iOS);
-
+          (defaultTargetPlatform == TargetPlatform.android ||
+              defaultTargetPlatform == TargetPlatform.iOS);
   bool get isOffline => OfflineModeService.isOffline.value;
-
   // ============================================================
   // CÀI ĐẶT
   // ============================================================
   Future<void> loadReaderSettings() async {
     try {
       final prefs = await AppPreferences.getInstance();
-      final sensitivity = prefs.getDouble('reader_scroll_sensitivity') ?? 1.0;
-      final pageMode = prefs.getBool('reader_page_mode') ?? false;
-      final tapNav = prefs.getBool('reader_tap_navigation_enabled') ?? true;
+      final sensitivity =
+          prefs.getDouble('reader_scroll_sensitivity') ?? 1.0;
+      final pageMode =
+          prefs.getBool('reader_page_mode') ?? false;
+      final tapNav =
+          prefs.getBool('reader_tap_navigation_enabled') ?? true;
       if (!mounted) return;
       setState(() {
-        scrollSensitivity = sensitivity.clamp(0.5, 10.0).toDouble();
+        scrollSensitivity =
+            sensitivity.clamp(0.5, 10.0).toDouble();
         usePageMode = pageMode;
         tapNavigationEnabled = tapNav;
       });
@@ -128,7 +132,6 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       debugPrint('Không thể tải thông tin cài đặt: $e');
     }
   }
-
   /// Chuyển chế độ đọc sang trạng thái được chỉ định.
   /// Giao diện được cập nhật ngay, không phải chờ lưu Preferences.
   Future<void> setReaderMode(bool nextMode) async {
@@ -142,7 +145,8 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || totalPages == 0) return;
-      final targetPage = (currentPage - 1).clamp(0, totalPages - 1);
+      final targetPage =
+      (currentPage - 1).clamp(0, totalPages - 1);
       if (nextMode) {
         if (_pageController.hasClients) {
           _pageController.jumpToPage(targetPage);
@@ -159,18 +163,20 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       debugPrint('Không thể lưu chế độ đọc: $e');
     }
   }
-
   /// Giữ lại hàm toggle để tương thích với các vị trí gọi hiện tại.
   Future<void> toggleReaderMode() async {
     await setReaderMode(!usePageMode);
   }
-
   /// Lưu độ nhạy cuộn.
   Future<void> _saveScrollSensitivity(double value) async {
-    final normalizedValue = value.clamp(0.5, 10.0).toDouble();
+    final normalizedValue =
+    value.clamp(0.5, 10.0).toDouble();
     try {
       final prefs = await AppPreferences.getInstance();
-      await prefs.setDouble('reader_scroll_sensitivity', normalizedValue);
+      await prefs.setDouble(
+        'reader_scroll_sensitivity',
+        normalizedValue,
+      );
     } catch (e) {
       debugPrint('Không thể lưu độ nhạy cuộn: $e');
     }
@@ -184,7 +190,6 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       debugPrint('Không thể lưu cài đặt nhấn để chuyển trang: $e');
     }
   }
-
   Future<void> showReaderSettingsDialog() async {
     var selectedPageMode = usePageMode;
     var selectedSensitivity = scrollSensitivity;
@@ -205,7 +210,9 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
                   children: [
                     const Text(
                       'Chế độ hiển thị',
-                      style: TextStyle(fontWeight: FontWeight.w600),
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                     const SizedBox(height: 8),
                     Row(
@@ -226,7 +233,10 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
                             selectedPageMode
                                 ? 'Đang ở chế độ từng trang'
                                 : 'Đang ở chế độ cuộn',
-                            style: Theme.of(context).textTheme.bodySmall,
+                            style: Theme
+                                .of(context)
+                                .textTheme
+                                .bodySmall,
                           ),
                         ),
                       ],
@@ -236,7 +246,9 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
                     const SizedBox(height: 8),
                     const Text(
                       'Nhấn để chuyển trang (chế độ cuộn)',
-                      style: TextStyle(fontWeight: FontWeight.w600),
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                     const SizedBox(height: 8),
                     Row(
@@ -261,7 +273,10 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
                             selectedTapNavigation
                                 ? 'Bật: Nhấn trái/phải để chuyển trang'
                                 : 'Tắt: Nhấn trái/phải không chuyển trang',
-                            style: Theme.of(context).textTheme.bodySmall,
+                            style: Theme
+                                .of(context)
+                                .textTheme
+                                .bodySmall,
                           ),
                         ),
                       ],
@@ -271,13 +286,18 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
                       const Divider(),
                       const SizedBox(height: 8),
                       Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        mainAxisAlignment:
+                        MainAxisAlignment.spaceBetween,
                         children: [
                           const Text(
                             'Độ nhạy cuộn',
-                            style: TextStyle(fontWeight: FontWeight.w600),
+                            style: TextStyle(
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
-                          Text('${selectedSensitivity.toStringAsFixed(1)}x'),
+                          Text(
+                            '${selectedSensitivity.toStringAsFixed(1)}x',
+                          ),
                         ],
                       ),
                       Row(
@@ -289,7 +309,7 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
                               max: 10.0,
                               divisions: 95,
                               label:
-                                  '${selectedSensitivity.toStringAsFixed(1)}x',
+                              '${selectedSensitivity.toStringAsFixed(1)}x',
                               onChanged: (value) {
                                 setDialogState(() {
                                   selectedSensitivity = value;
@@ -336,17 +356,27 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
                         ],
                       ),
                       const Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        mainAxisAlignment:
+                        MainAxisAlignment.spaceBetween,
                         children: [
-                          Text('Chậm', style: TextStyle(fontSize: 12)),
-                          Text('Nhanh', style: TextStyle(fontSize: 12)),
+                          Text(
+                            'Chậm',
+                            style: TextStyle(fontSize: 12),
+                          ),
+                          Text(
+                            'Nhanh',
+                            style: TextStyle(fontSize: 12),
+                          ),
                         ],
                       ),
                       const SizedBox(height: 4),
                       Text(
                         'Áp dụng cho con lăn chuột, phím mũi tên lên/xuống '
-                        'và nút cuộn.',
-                        style: Theme.of(context).textTheme.bodySmall,
+                            'và nút cuộn.',
+                        style: Theme
+                            .of(context)
+                            .textTheme
+                            .bodySmall,
                         textAlign: TextAlign.center,
                       ),
                     ],
@@ -359,7 +389,6 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       },
     );
   }
-
   // ============================================================
   // KHỞI TẠO TRUYỆN
   // ============================================================
@@ -370,22 +399,30 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       });
     }
     try {
-      final storyData = await StoryFetcher().fetchStory(storyId);
+      final storyData =
+      await StoryFetcher().fetchStory(storyId);
       final allChapters = storyData['chapters'] is List
           ? List<dynamic>.from(storyData['chapters'])
           : <dynamic>[];
       final sourceSet = <String>{};
       for (final item in allChapters) {
         if (item is! Map) continue;
-        final itemSource = item['createdBy']?.toString().trim() ?? '';
+        final itemSource =
+            item['createdBy']?.toString().trim() ?? '';
         if (itemSource.isNotEmpty) {
           sourceSet.add(itemSource);
         }
       }
       final sourceList = sourceSet.toList()
-        ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+        ..sort(
+              (a, b) =>
+              a.toLowerCase().compareTo(b.toLowerCase()),
+        );
       var initialSource = source;
-      var initialChapters = getChaptersBySourceFrom(allChapters, initialSource);
+      var initialChapters = getChaptersBySourceFrom(
+        allChapters,
+        initialSource,
+      );
       if (initialChapters.isEmpty && allChapters.isNotEmpty) {
         dynamic initialChapter;
         for (final item in allChapters) {
@@ -395,12 +432,16 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
           }
         }
         if (initialChapter is Map) {
-          initialSource = initialChapter['createdBy']?.toString().trim() ?? '';
+          initialSource =
+              initialChapter['createdBy']?.toString().trim() ?? '';
         }
         if (initialSource.isEmpty && sourceList.isNotEmpty) {
           initialSource = sourceList.first;
         }
-        initialChapters = getChaptersBySourceFrom(allChapters, initialSource);
+        initialChapters = getChaptersBySourceFrom(
+          allChapters,
+          initialSource,
+        );
       }
       if (!mounted) return;
       setState(() {
@@ -408,18 +449,21 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
         sources = sourceList;
         currentSource = initialSource;
         chapters = initialChapters;
-        lastStoryTitle = storyData['title']?.toString() ?? '';
-        coverUrl = storyData['coverUrl']?.toString() ?? '';
+        lastStoryTitle =
+            storyData['title']?.toString() ?? '';
+        coverUrl =
+            storyData['coverUrl']?.toString() ?? '';
       });
       var targetChapterId = chapterId;
       // Kiểm tra trong toàn bộ chapter (allChapters) trước, không giới hạn source,
       // tránh trường hợp chapter muốn đọc bị loại ra do lọc theo source dẫn đến
       // nhầm sang chapter khác và load sai trang.
       final chapterExistsInAll = allChapters.any(
-        (item) => chapterIdOf(item) == targetChapterId,
+            (item) => chapterIdOf(item) == targetChapterId,
       );
       if (!chapterExistsInAll && allChapters.isNotEmpty) {
-        targetChapterId = chapterIdOf(chapters.first) ?? chapterId;
+        targetChapterId =
+            chapterIdOf(chapters.first) ?? chapterId;
       }
       await fetchChapter(targetChapterId);
     } catch (e) {
@@ -431,7 +475,6 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       showError('Không thể tải thông tin truyện: $e');
     }
   }
-
   int? chapterIdOf(dynamic item) {
     if (item is! Map) return null;
     final value = item['id'];
@@ -439,33 +482,31 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     if (value is num) return value.toInt();
     return int.tryParse(value?.toString() ?? '');
   }
-
   double parseChapterNumber(dynamic value) {
     if (value is num) return value.toDouble();
     return double.tryParse(value?.toString() ?? '') ?? 0;
   }
-
-  List<dynamic> getChaptersBySourceFrom(
-    List<dynamic> sourceChapters,
-    String source,
-  ) {
+  List<dynamic> getChaptersBySourceFrom(List<dynamic> sourceChapters,
+      String source,) {
     final filtered = sourceChapters.where((item) {
       if (item is! Map) return false;
-      return (item['createdBy']?.toString().trim() ?? '') == source;
+      return (item['createdBy']?.toString().trim() ?? '') ==
+          source;
     }).toList();
     filtered.sort((a, b) {
-      final numberA = parseChapterNumber(a['chapterNumber']);
-      final numberB = parseChapterNumber(b['chapterNumber']);
+      final numberA =
+      parseChapterNumber(a['chapterNumber']);
+      final numberB =
+      parseChapterNumber(b['chapterNumber']);
       final comparison = numberA.compareTo(numberB);
       if (comparison != 0) return comparison;
-      return (chapterIdOf(a) ?? 0).compareTo(chapterIdOf(b) ?? 0);
+      return (chapterIdOf(a) ?? 0)
+          .compareTo(chapterIdOf(b) ?? 0);
     });
     return filtered;
   }
-
   List<dynamic> getChaptersBySource(String source) =>
       getChaptersBySourceFrom(_allChapters, source);
-
   // ============================================================
   // ĐỔI SOURCE
   // ============================================================
@@ -474,7 +515,9 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     final filtered = getChaptersBySource(newSource);
     if (filtered.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Source "$newSource" không có chapter.')),
+        SnackBar(
+          content: Text('Source "$newSource" không có chapter.'),
+        ),
       );
       return;
     }
@@ -484,23 +527,29 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     });
     updateNextPrev();
   }
-
   // ============================================================
   // TẢI CHƯƠNG
   // ============================================================
-  Future<void> fetchChapter(int id, {bool openAtLastPage = false}) async {
+  Future<void> fetchChapter(int id, {
+    bool openAtLastPage = false,
+  }) async {
     if (!mounted) return;
     final prefetchGeneration = ++_prefetchGeneration;
     _jumpToImageRequestId++;
+    _clearScrollAnchor();
     setState(() {
       loading = true;
     });
     try {
-      final data = await ChapterFetcher().fetchChapter(id, storyId: storyId);
+      final data = await ChapterFetcher().fetchChapter(
+        id,
+        storyId: storyId,
+      );
       if (!mounted) return;
       // Đọc trang đã lưu cho chương này để tiếp tục đọc từ trang dở.
       final savedPage = await _loadSavedPage(id);
-      final newBlocks = List<dynamic>.from(data['blocks'] ?? []);
+      final newBlocks =
+      List<dynamic>.from(data['blocks'] ?? []);
       final imageIndexByBlockIndex = <int>[];
       final imageBlockIndexes = <int>[];
       final imageUrls = <String>[];
@@ -520,25 +569,30 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
         }
       }
       bool offlineImages = false;
-      final storyAvailable = await OfflineEntryService.instance
-          .isStoryAvailable(storyId);
+      final storyAvailable =
+      await OfflineEntryService.instance.isStoryAvailable(
+        storyId,
+      );
       if (storyAvailable) {
-        offlineImages = await OfflineEntryService.instance.isChapterAvailable(
+        offlineImages =
+        await OfflineEntryService.instance.isChapterAvailable(
           storyId,
           id,
         );
       }
       final imageKeys = List<GlobalKey>.generate(
         imageCount,
-        (_) => GlobalKey(),
+            (_) => GlobalKey(),
       );
       currentChapterId = id;
       setState(() {
         chapter = data;
         blocks = newBlocks;
-        _imageIndexByBlockIndex = imageIndexByBlockIndex;
+        _imageIndexByBlockIndex =
+            imageIndexByBlockIndex;
         _imageBlockIndexes = imageBlockIndexes;
         _imageKeys = imageKeys;
+        _clearScrollAnchor();
         totalPages = imageCount;
         final defaultPage = openAtLastPage ? imageCount : 1;
         int? initialPage;
@@ -551,10 +605,10 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
         }
         currentPage = imageCount > 0
             ? ((initialPage != null &&
-                      initialPage >= 1 &&
-                      initialPage <= imageCount)
-                  ? initialPage
-                  : defaultPage)
+            initialPage >= 1 &&
+            initialPage <= imageCount)
+            ? initialPage
+            : defaultPage)
             : 0;
         // Tất cả ảnh của chương được phép tải ngay, không chờ cuộn tới.
         initialImageCount = 0;
@@ -569,10 +623,12 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
         _windowsCanvasController.value = Matrix4.identity();
         _mobileZoomed = false;
         _activePointers.clear();
-        lastChapterNumber = parseChapterNumber(data['chapterNumber']);
+        lastChapterNumber =
+            parseChapterNumber(data['chapterNumber']);
         loading = false;
       });
       updateNextPrev();
+      _loadCommentCount();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted || currentChapterId != id) return;
         // Tải trước toàn bộ ảnh của chương vào đúng cache đĩa mà
@@ -586,13 +642,14 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
             orderedUrls,
             concurrency: 3,
             isCancelled: () =>
-                !mounted ||
+            !mounted ||
                 currentChapterId != id ||
                 _prefetchGeneration != prefetchGeneration,
           );
         }
         if (totalPages > 0 && usePageMode && _pageController.hasClients) {
-          final targetPage = (currentPage - 1).clamp(0, totalPages - 1).toInt();
+          final targetPage =
+          (currentPage - 1).clamp(0, totalPages - 1).toInt();
           _isJumpingToInitialPage = true;
           _pageController.jumpToPage(targetPage);
           WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -614,10 +671,18 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
               _jumpToImage(
                 targetPage - 1,
                 animate: false,
+                alignBottom: openAtLastPage,
                 onCompleted: () {
                   if (!mounted || currentChapterId != id) return;
                   _isJumpingToInitialPage = false;
-                  updateReadingProgress();
+                  if (openAtLastPage && !usePageMode) {
+                    if (currentPage != totalPages) {
+                      setState(() => currentPage = totalPages);
+                    }
+                    _savePageProgressDebounced(totalPages);
+                  } else {
+                    updateReadingProgress();
+                  }
                 },
               );
             });
@@ -633,11 +698,9 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
         }
         _keyboardFocusNode.requestFocus();
         // Giải mã sẵn vài trang quanh trang đang mở vào bộ nhớ.
-        _precachePageWindow(
-          totalPages > 0
-              ? (openAtLastPage ? totalPages : currentPage)
-              : currentPage,
-        );
+        _precachePageWindow(totalPages > 0
+            ? (openAtLastPage ? totalPages : currentPage)
+            : currentPage);
       });
       await saveReadingHistory(id);
     } catch (e) {
@@ -649,7 +712,6 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       showError('Không thể tải chương: $e');
     }
   }
-
   Future<void> saveReadingHistory(int chapterId) async {
     try {
       final prefs = await AppPreferences.getInstance();
@@ -663,7 +725,11 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
           currentSource,
           page: currentPage,
         );
-        await ReadingList().save(user.id, storyId, chapterId);
+        await ReadingList().save(
+          user.id,
+          storyId,
+          chapterId,
+        );
       } else {
         await saveLastRead(chapterId);
       }
@@ -672,13 +738,26 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     }
   }
 
-  void showError(String message) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+  Future<void> _loadCommentCount() async {
+    try {
+      final uri = Uri.parse('${ApiConfig.api}/comments/chapter/$currentChapterId/count');
+      final res = await http.get(uri);
+      if (res.statusCode == 200) {
+        final count = int.tryParse(res.body) ?? 0;
+        if (!mounted) return;
+        setState(() => commentCount = count);
+      }
+    } catch (e) {
+      debugPrint('Không thể tải số lượng bình luận: $e');
+    }
   }
 
+  void showError(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
   // ============================================================
   // BÌNH LUẬN (COMMENT)
   // ============================================================
@@ -726,15 +805,13 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
   }
 
   /// Lấy hint text hiển thị tên comment cha khi đang trả lời.
-  String _getParentHint(
-    int? replyingToId,
-    List<Map<String, dynamic>> comments,
-  ) {
+  String _getParentHint(int? replyingToId, List<Map<String, dynamic>> comments) {
     if (replyingToId == null) return 'Viết bình luận...';
     for (final c in comments) {
       final id = (c['id'] as num).toInt();
       if (id == replyingToId) {
-        final name = c['username'] ?? c['displayName'] ?? 'Người dùng';
+        final name =
+            c['username'] ?? c['displayName'] ?? 'Người dùng';
         return 'Trả lời $name...';
       }
     }
@@ -742,16 +819,16 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
   }
 
   Widget _buildCommentList(
-    List<Map<String, dynamic>> comments,
-    BuildContext context,
-    void Function(void Function()) setDialog,
-    int? Function() currentLoggedInUserId,
-    Future<void> Function(int, String) editComment,
-    Future<void> Function(int) deleteComment,
-    void Function(int) onSetReplyingToId,
-    Set<int> expandedParentIds,
-    void Function(int) onToggleParent,
-  ) {
+      List<Map<String, dynamic>> comments,
+      BuildContext context,
+      void Function(void Function()) setDialog,
+      int? Function() currentLoggedInUserId,
+      Future<void> Function(int, String) editComment,
+      Future<void> Function(int) deleteComment,
+      void Function(int) onSetReplyingToId,
+      Set<int> expandedParentIds,
+      void Function(int) onToggleParent,
+      ) {
     // Bản tra cứu comment theo id và username của comment theo id.
     final Map<int, Map<String, dynamic>> byId = {};
     final Map<int, String> parentUsernameById = {};
@@ -818,7 +895,8 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       if (parent == null) {
         return 'Trả lời Người dùng';
       }
-      final name = parent['username'] ?? parent['displayName'] ?? 'Người dùng';
+      final name =
+          parent['username'] ?? parent['displayName'] ?? 'Người dùng';
       final content = (parent['content'] as String?) ?? '';
       final shortContent = content.length > 50
           ? '${content.substring(0, 50)}...'
@@ -832,13 +910,17 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
           ? (c['parentId'] as num).toInt()
           : null;
       final ownerId = (c['userId'] as num?)?.toInt();
-      final isOwner = ownerId != null && ownerId == currentLoggedInUserId();
-      final username = c['username'] ?? c['displayName'] ?? 'Người dùng';
+      final isOwner =
+          ownerId != null && ownerId == currentLoggedInUserId();
+      final username =
+          c['username'] ?? c['displayName'] ?? 'Người dùng';
       final content = c['content'] ?? '';
       final created = c['createdAt'] ?? '';
       final formattedDate = _formatCommentDate(created);
 
-      final replyLabel = parentId != null ? buildReplyLabel(parentId) : null;
+      final replyLabel = parentId != null
+          ? buildReplyLabel(parentId)
+          : null;
 
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -850,13 +932,14 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
               dense: true,
               leading: CircleAvatar(
                 radius: 20,
-                backgroundImage:
-                    c['avatarUrl'] != null &&
-                        c['avatarUrl'].toString().isNotEmpty
-                    ? NetworkImage('${ApiConfig.avatarImage}/${c['avatarUrl']}')
+                backgroundImage: c['avatarUrl'] != null &&
+                    c['avatarUrl'].toString().isNotEmpty
+                    ? NetworkImage(
+                  '${ApiConfig.avatarImage}/${c['avatarUrl']}',
+                )
                     : null,
-                child:
-                    c['avatarUrl'] == null || c['avatarUrl'].toString().isEmpty
+                child: c['avatarUrl'] == null ||
+                    c['avatarUrl'].toString().isEmpty
                     ? const Icon(Icons.person, size: 20)
                     : null,
               ),
@@ -915,15 +998,36 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
                 children: [
                   if (parentId == null &&
                       (repliesByRoot[cid]?.isNotEmpty ?? false)) ...[
-                    IconButton(
-                      icon: Icon(
-                        expandedParentIds.contains(cid)
-                            ? Icons.expand_less
-                            : Icons.expand_more,
-                        size: 20,
-                        color: Colors.blue,
-                      ),
-                      onPressed: () => onToggleParent(cid),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.blue.shade100,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text(
+                            '${repliesByRoot[cid]!.length}',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.blue.shade800,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        IconButton(
+                          icon: Icon(
+                            expandedParentIds.contains(cid)
+                                ? Icons.expand_less
+                                : Icons.expand_more,
+                            size: 20,
+                            color: Colors.blue,
+                          ),
+                          onPressed: () => onToggleParent(cid),
+                        ),
+                      ],
                     ),
                   ],
                   if (isOwner) ...[
@@ -983,299 +1087,297 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     final messenger = ScaffoldMessenger.of(context);
     showDialog<void>(
       context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (dialogContext, setDialogState) {
-          void setDialog(void Function() fn) {
-            if (!dialogContext.mounted) return;
-            setDialogState(fn);
-          }
-
-          void showDialogMessage(String message) {
-            if (!mounted) return;
-            messenger.showSnackBar(SnackBar(content: Text(message)));
-          }
-
-          void toggleParent(int parentId) {
-            setDialog(() {
-              if (expandedParentIds.contains(parentId)) {
-                expandedParentIds.remove(parentId);
-              } else {
-                expandedParentIds.add(parentId);
+      builder: (dialogContext) =>
+          StatefulBuilder(
+            builder: (dialogContext, setDialogState) {
+              void setDialog(void Function() fn) {
+                if (!dialogContext.mounted) return;
+                setDialogState(fn);
               }
-            });
-          }
-
-          Future<void> loadComments() async {
-            if (dialogLoading || !dialogContext.mounted) return;
-            setDialog(() => dialogLoading = true);
-            try {
-              final data = await CommentService().getComments(
-                chapterId: chapterId,
-                page: 0,
-                limit: 50,
-              );
-              if (!dialogContext.mounted) return;
-              setDialog(() {
-                dialogComments = data;
-                dialogLoading = false;
-              });
-            } catch (e) {
-              if (!dialogContext.mounted) return;
-              setDialog(() => dialogLoading = false);
-              showDialogMessage('Không thể tải bình luận: $e');
-            }
-          }
-
-          Future<void> postComment(String text, {int? parentId}) async {
-            if (text.trim().isEmpty || posting || !dialogContext.mounted) {
-              return;
-            }
-            if (!mounted) return;
-            FocusManager.instance.primaryFocus?.unfocus();
-            setDialog(() => posting = true);
-            try {
-              // Kiểm tra đăng nhập trước khi gửi bình luận.
-              final prefs = await AppPreferences.getInstance();
-              final userString = prefs.getString('user');
-              if (!dialogContext.mounted) return;
-              if (userString == null || userString.isEmpty) {
-                // Đóng dialog trước khi hiển thị thông báo.
-                Navigator.of(dialogContext).pop();
-                showDialogMessage('Vui lòng đăng nhập để bình luận.');
-                return;
+              void showDialogMessage(String message) {
+                if (!mounted) return;
+                messenger.showSnackBar(SnackBar(content: Text(message)));
               }
-              await CommentService().createComment(
-                chapterId: chapterId,
-                content: text,
-                parentId: parentId,
-              );
-              if (!dialogContext.mounted) return;
-              dialogController.clear();
-              setDialog(() {
-                dialogReplyingToId = null;
-                posting = false;
-              });
-              await loadComments();
-            } catch (e) {
-              if (!dialogContext.mounted) return;
-              setDialog(() => posting = false);
-              showDialogMessage('$e');
-            } finally {
-              if (dialogContext.mounted) {
-                setDialog(() => posting = false);
+              void toggleParent(int parentId) {
+                setDialog(() {
+                  if (expandedParentIds.contains(parentId)) {
+                    expandedParentIds.remove(parentId);
+                  } else {
+                    expandedParentIds.add(parentId);
+                  }
+                });
               }
-            }
-          }
-
-          Future<void> editComment(int commentId, String oldContent) async {
-            final controller = TextEditingController(text: oldContent);
-            try {
-              final confirmed = await showDialog<bool>(
-                context: dialogContext,
-                builder: (dc) => AlertDialog(
-                  title: const Text('Chỉnh sửa bình luận'),
-                  content: TextField(
-                    controller: controller,
-                    maxLines: 3,
-                    autofocus: true,
-                    decoration: const InputDecoration(
-                      hintText: 'Nội dung bình luận',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.pop(dc, false),
-                      child: const Text('Hủy'),
-                    ),
-                    TextButton(
-                      onPressed: () => Navigator.pop(dc, true),
-                      child: const Text('Lưu'),
-                    ),
-                  ],
-                ),
-              );
-              if (confirmed != true || !dialogContext.mounted) return;
-              await CommentService().updateComment(
-                commentId: commentId,
-                newContent: controller.text,
-              );
-              if (!dialogContext.mounted) return;
-              await loadComments();
-            } catch (e) {
-              if (!dialogContext.mounted) return;
-              showDialogMessage('$e');
-            } finally {
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                controller.dispose();
-              });
-            }
-          }
-
-          Future<void> deleteComment(int commentId) async {
-            try {
-              final confirmed = await showDialog<bool>(
-                context: dialogContext,
-                builder: (dc) => AlertDialog(
-                  title: const Text('Xóa bình luận'),
-                  content: const Text('Bạn có chắc muốn xóa bình luận này?'),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.pop(dc, false),
-                      child: const Text('Hủy'),
-                    ),
-                    TextButton(
-                      onPressed: () => Navigator.pop(dc, true),
-                      child: const Text('Xóa'),
-                    ),
-                  ],
-                ),
-              );
-              if (confirmed != true || !dialogContext.mounted) return;
-              await CommentService().deleteComment(commentId);
-              if (!dialogContext.mounted) return;
-              await loadComments();
-            } catch (e) {
-              if (!dialogContext.mounted) return;
-              showDialogMessage('$e');
-            }
-          }
-
-          int? currentLoggedInUserId() {
-            return null; // Sử dụng null để tránh kiểm tra quyền sở hữu phức tạp
-          }
-
-          if (!loadStarted) {
-            loadStarted = true;
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (dialogContext.mounted) {
-                loadComments();
+              Future<void> loadComments() async {
+                if (dialogLoading || !dialogContext.mounted) return;
+                setDialog(() => dialogLoading = true);
+                try {
+                  final data = await CommentService().getComments(
+                    chapterId: currentChapterId,
+                    page: 0,
+                    limit: 50,
+                  );
+                  if (!dialogContext.mounted) return;
+                  setDialog(() {
+                    dialogComments = data;
+                    dialogLoading = false;
+                  });
+                } catch (e) {
+                  if (!dialogContext.mounted) return;
+                  setDialog(() => dialogLoading = false);
+                  showDialogMessage('Không thể tải bình luận: $e');
+                }
               }
-            });
-          }
-          return FocusScope(
-            child: AlertDialog(
-              title: const Text('Bình luận'),
-              content: SizedBox(
-                width: 750,
-                height: 650,
-                child: Column(
-                  children: [
-                    Expanded(
-                      child: dialogLoading && dialogComments.isEmpty
-                          ? const Center(child: CircularProgressIndicator())
-                          : dialogComments.isEmpty
-                          ? const Center(child: Text('Chưa có bình luận nào'))
-                          : _buildCommentList(
-                              dialogComments,
-                              context,
-                              setDialog,
-                              currentLoggedInUserId,
-                              editComment,
-                              deleteComment,
-                              (id) => setDialog(() => dialogReplyingToId = id),
-                              expandedParentIds,
-                              toggleParent,
+              Future<void> postComment(String text, {int? parentId}) async {
+                if (text
+                    .trim()
+                    .isEmpty || posting || !dialogContext.mounted) {
+                  return;
+                }
+                if (!mounted) return;
+                FocusManager.instance.primaryFocus?.unfocus();
+                setDialog(() => posting = true);
+                try {
+                  // Kiểm tra đăng nhập trước khi gửi bình luận.
+                  final prefs = await AppPreferences.getInstance();
+                  final userString = prefs.getString('user');
+                  if (!dialogContext.mounted) return;
+                  if (userString == null || userString.isEmpty) {
+                    // Đóng dialog trước khi hiển thị thông báo.
+                    Navigator.of(dialogContext).pop();
+                    showDialogMessage('Vui lòng đăng nhập để bình luận.');
+                    return;
+                  }
+                  await CommentService().createComment(
+                    chapterId: currentChapterId,
+                    content: text,
+                    parentId: parentId,
+                  );
+                  if (!dialogContext.mounted) return;
+                  dialogController.clear();
+                  setDialog(() {
+                    dialogReplyingToId = null;
+                    posting = false;
+                  });
+                  await loadComments();
+                  _loadCommentCount();
+                } catch (e) {
+                  if (!dialogContext.mounted) return;
+                  setDialog(() => posting = false);
+                  showDialogMessage('$e');
+                } finally {
+                  if (dialogContext.mounted) {
+                    setDialog(() => posting = false);
+                  }
+                }
+              }
+              Future<void> editComment(int commentId, String oldContent) async {
+                final controller = TextEditingController(text: oldContent);
+                try {
+                  final confirmed = await showDialog<bool>(
+                    context: dialogContext,
+                    builder: (dc) =>
+                        AlertDialog(
+                          title: const Text('Chỉnh sửa bình luận'),
+                          content: TextField(
+                            controller: controller,
+                            maxLines: 3,
+                            autofocus: true,
+                            decoration: const InputDecoration(
+                              hintText: 'Nội dung bình luận',
+                              border: OutlineInputBorder(),
                             ),
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
+                          ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(dc, false),
+                              child: const Text('Hủy'),
+                            ),
+                            TextButton(
+                              onPressed: () => Navigator.pop(dc, true),
+                              child: const Text('Lưu'),
+                            ),
+                          ],
+                        ),
+                  );
+                  if (confirmed != true || !dialogContext.mounted) return;
+                  await CommentService().updateComment(
+                    commentId: commentId,
+                    newContent: controller.text,
+                  );
+                  if (!dialogContext.mounted) return;
+                  await loadComments();
+                } catch (e) {
+                  if (!dialogContext.mounted) return;
+                  showDialogMessage('$e');
+                } finally {
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    controller.dispose();
+                  });
+                }
+              }
+              Future<void> deleteComment(int commentId) async {
+                try {
+                  final confirmed = await showDialog<bool>(
+                    context: dialogContext,
+                    builder: (dc) =>
+                        AlertDialog(
+                          title: const Text('Xóa bình luận'),
+                          content: const Text(
+                              'Bạn có chắc muốn xóa bình luận này?'),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(dc, false),
+                              child: const Text('Hủy'),
+                            ),
+                            TextButton(
+                              onPressed: () => Navigator.pop(dc, true),
+                              child: const Text('Xóa'),
+                            ),
+                          ],
+                        ),
+                  );
+                  if (confirmed != true || !dialogContext.mounted) return;
+                  await CommentService().deleteComment(commentId);
+                  if (!dialogContext.mounted) return;
+                  await loadComments();
+                  _loadCommentCount();
+                } catch (e) {
+                  if (!dialogContext.mounted) return;
+                  showDialogMessage('$e');
+                }
+              }
+              int? currentLoggedInUserId() {
+                return null; // Sử dụng null để tránh kiểm tra quyền sở hữu phức tạp
+              }
+              if (!loadStarted) {
+                loadStarted = true;
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (dialogContext.mounted) {
+                    loadComments();
+                  }
+                });
+              }
+              return FocusScope(
+                child: AlertDialog(
+                  title: const Text('Bình luận'),
+                  content: SizedBox(
+                    width: 750,
+                    height: 650,
+                    child: Column(
                       children: [
                         Expanded(
-                          child: RawKeyboardListener(
-                            focusNode: FocusNode(),
-                            onKey: (RawKeyEvent event) {
-                              if (event is RawKeyDownEvent &&
-                                  event.logicalKey ==
-                                      LogicalKeyboardKey.enter) {
-                                if (!event.isShiftPressed) {
-                                  postComment(
-                                    dialogController.text,
-                                    parentId: dialogReplyingToId,
-                                  );
-                                } else {
-                                  final text = dialogController.text;
-                                  final sel = dialogController.selection;
-                                  dialogController.text = text.replaceRange(
-                                    sel.start,
-                                    sel.end,
-                                    '\n',
-                                  );
-                                  dialogController.selection =
-                                      TextSelection.collapsed(
-                                        offset: sel.start + 1,
+                          child: dialogLoading && dialogComments.isEmpty
+                              ? const Center(child: CircularProgressIndicator())
+                              : dialogComments.isEmpty
+                              ? const Center(child: Text('Chưa có bình luận nào'))
+                              : _buildCommentList(
+                            dialogComments,
+                            context,
+                            setDialog,
+                            currentLoggedInUserId,
+                            editComment,
+                            deleteComment,
+                                (id) => setDialog(() => dialogReplyingToId = id),
+                            expandedParentIds,
+                            toggleParent,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: RawKeyboardListener(
+                                focusNode: FocusNode(),
+                                onKey: (RawKeyEvent event) {
+                                  if (event is RawKeyDownEvent &&
+                                      event.logicalKey ==
+                                          LogicalKeyboardKey.enter) {
+                                    if (!event.isShiftPressed) {
+                                      postComment(
+                                        dialogController.text,
+                                        parentId: dialogReplyingToId,
                                       );
-                                }
-                              }
-                            },
-                            child: TextField(
-                              controller: dialogController,
-                              maxLines: null,
-                              minLines: 1,
-                              enabled: !posting,
-                              decoration: InputDecoration(
-                                hintText: dialogReplyingToId != null
-                                    ? _getParentHint(
-                                        dialogReplyingToId,
-                                        dialogComments,
-                                      )
-                                    : 'Viết bình luận...',
-                                border: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(24),
-                                ),
-                                contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 16,
-                                  vertical: 10,
-                                ),
-                                suffixIcon: IconButton(
-                                  icon: posting
-                                      ? const SizedBox(
-                                          width: 18,
-                                          height: 18,
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2,
-                                          ),
-                                        )
-                                      : const Icon(Icons.send, size: 20),
-                                  onPressed: posting
-                                      ? null
-                                      : () => postComment(
-                                          dialogController.text,
-                                          parentId: dialogReplyingToId,
+                                    } else {
+                                      final text = dialogController.text;
+                                      final sel = dialogController.selection;
+                                      dialogController.text = text.replaceRange(
+                                        sel.start,
+                                        sel.end,
+                                        '\n',
+                                      );
+                                      dialogController.selection =
+                                          TextSelection.collapsed(
+                                            offset: sel.start + 1,
+                                          );
+                                    }
+                                  }
+                                },
+                                child: TextField(
+                                  controller: dialogController,
+                                  maxLines: null,
+                                  minLines: 1,
+                                  enabled: !posting,
+                                  decoration: InputDecoration(
+                                    hintText: dialogReplyingToId != null
+                                        ? _getParentHint(dialogReplyingToId, dialogComments)
+                                        : 'Viết bình luận...',
+                                    border: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(24),
+                                    ),
+                                    contentPadding: const EdgeInsets.symmetric(
+                                      horizontal: 16,
+                                      vertical: 10,
+                                    ),
+                                    suffixIcon: IconButton(
+                                      icon: posting
+                                          ? const SizedBox(
+                                        width: 18,
+                                        height: 18,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
                                         ),
+                                      )
+                                          : const Icon(Icons.send, size: 20),
+                                      onPressed: posting
+                                          ? null
+                                          : () =>
+                                          postComment(
+                                            dialogController.text,
+                                            parentId: dialogReplyingToId,
+                                          ),
+                                    ),
+                                  ),
                                 ),
                               ),
                             ),
-                          ),
+                          ],
                         ),
                       ],
                     ),
+                  ),
+                  actions: [
+                    if (dialogReplyingToId != null)
+                      TextButton(
+                        onPressed: () {
+                          FocusManager.instance.primaryFocus?.unfocus();
+                          setDialog(() {
+                            dialogReplyingToId = null;
+                          });
+                        },
+                        child: const Text('Hủy trả lời'),
+                      ),
+                    TextButton(
+                      onPressed: () {
+                        FocusManager.instance.primaryFocus?.unfocus();
+                        Navigator.of(dialogContext).pop();
+                      },
+                      child: const Text('Đóng'),
+                    ),
                   ],
                 ),
-              ),
-              actions: [
-                if (dialogReplyingToId != null)
-                  TextButton(
-                    onPressed: () {
-                      FocusManager.instance.primaryFocus?.unfocus();
-                      setDialog(() {
-                        dialogReplyingToId = null;
-                      });
-                    },
-                    child: const Text('Hủy trả lời'),
-                  ),
-                TextButton(
-                  onPressed: () {
-                    FocusManager.instance.primaryFocus?.unfocus();
-                    Navigator.of(dialogContext).pop();
-                  },
-                  child: const Text('Đóng'),
-                ),
-              ],
-            ),
-          );
-        },
-      ),
+              );
+            },
+          ),
     ).whenComplete(() {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         FocusManager.instance.primaryFocus?.unfocus();
@@ -1283,23 +1385,25 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       });
     });
   }
-
   // ============================================================
   // ON INITIAL IMAGE FINISHED
   // ============================================================
-  void onInitialImageFinished(int chapterId, int imageIndex) {
+  void onInitialImageFinished(
+      int chapterId,
+      int imageIndex,
+      ) {
     if (!mounted || chapterId != currentChapterId) return;
     if (imageIndex >= initialImageCount) return;
     if (!_finishedInitialImageIndexes.add(imageIndex)) {
       return;
     }
-    if (_finishedInitialImageIndexes.length >= initialImageCount) {
+    if (_finishedInitialImageIndexes.length >=
+        initialImageCount) {
       setState(() {
         allowRemainingImages = true;
       });
     }
   }
-
   // ============================================================
   // TIẾN ĐỘ ĐỌC
   // ============================================================
@@ -1326,16 +1430,16 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
         ),
         context,
       ).then<void>(
-        (_) {},
+            (_) {},
         onError: (Object error, StackTrace stackTrace) {
           debugPrint('Lỗi preload ảnh $imageName: $error');
         },
       );
     }
   }
-
   void updateReadingProgress() {
     if (_isJumpingToInitialPage || usePageMode || totalPages == 0) return;
+
     RenderBox? viewportObject;
     if (isWindows) {
       final object = _readerViewportKey.currentContext?.findRenderObject();
@@ -1350,52 +1454,70 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       }
     }
     if (viewportObject == null) return;
-    final viewportTop = viewportObject.localToGlobal(Offset.zero).dy;
-    int? lastPageStarted;
-    int? firstAvailablePage;
-    int? visiblePage;
+
+    // Xác định trang bằng một điểm cố định cách mép trái viewport 5 px
+    // và cách mép trên 5 px. Không thay đổi thuật toán căn mép trên khi nhảy trang.
+    final viewportTopLeft = viewportObject.localToGlobal(Offset.zero);
+    final progressPoint = Offset(
+      viewportTopLeft.dx + 5.0,
+      viewportTopLeft.dy + 5.0,
+    );
+
+    int? pageAtProgressPoint;
     int? nearestFollowingPage;
     double nearestFollowingDistance = double.infinity;
+    int? nearestPage;
+    double nearestPageDistance = double.infinity;
+
     for (int i = 0; i < _imageKeys.length; i++) {
       final imageObject = _imageKeys[i].currentContext?.findRenderObject();
       if (imageObject is! RenderBox || !imageObject.hasSize) continue;
-      final imageTop = imageObject.localToGlobal(Offset.zero).dy;
-      final imageBottom = imageTop + imageObject.size.height;
-      firstAvailablePage ??= i + 1;
-      if (imageTop <= viewportTop) {
-        lastPageStarted = i + 1;
-      }
-      if (imageTop <= viewportTop && imageBottom > viewportTop) {
-        visiblePage = i + 1;
+
+      final imageTopLeft = imageObject.localToGlobal(Offset.zero);
+      final imageRect = imageTopLeft & imageObject.size;
+
+      // Trang chứa đúng điểm kiểm tra 5 px là trang đang đọc.
+      if (imageRect.contains(progressPoint)) {
+        pageAtProgressPoint = i + 1;
         break;
       }
-      if (imageTop > viewportTop) {
-        final distance = imageTop - viewportTop;
-        if (distance < nearestFollowingDistance) {
-          nearestFollowingDistance = distance;
-          nearestFollowingPage = i + 1;
-        }
+
+      // Dự phòng khi điểm kiểm tra rơi vào khe hở giữa hai ảnh.
+      final imageBottom = imageTopLeft.dy + imageObject.size.height;
+      final distance = progressPoint.dy < imageTopLeft.dy
+          ? imageTopLeft.dy - progressPoint.dy
+          : progressPoint.dy > imageBottom
+          ? progressPoint.dy - imageBottom
+          : 0.0;
+
+      if (imageTopLeft.dy > progressPoint.dy &&
+          imageTopLeft.dy - progressPoint.dy < nearestFollowingDistance) {
+        nearestFollowingDistance = imageTopLeft.dy - progressPoint.dy;
+        nearestFollowingPage = i + 1;
+      }
+
+      if (distance < nearestPageDistance) {
+        nearestPageDistance = distance;
+        nearestPage = i + 1;
       }
     }
-    final newPage =
-        visiblePage ??
-        lastPageStarted ??
+
+    final newPage = pageAtProgressPoint ??
         nearestFollowingPage ??
-        firstAvailablePage ??
+        nearestPage ??
         1;
+
     if (newPage != currentPage && mounted) {
       setState(() => currentPage = newPage);
       _savePageProgressDebounced(newPage);
     }
   }
-
   void _scheduleReadingProgressUpdate() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || usePageMode || _isCtrlZooming) return;
       updateReadingProgress();
     });
   }
-
   void onPageChanged(int page) {
     if (!mounted) return;
     final newPage = page + 1;
@@ -1406,11 +1528,11 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     _savePageProgressDebounced(newPage);
     _precachePageWindow(newPage);
   }
-
   @override
   void dispose() {
     _prefetchGeneration++;
     _jumpToImageRequestId++;
+    _clearScrollAnchor();
     // Hủy debounce và lưu ngay trang đang đọc trước khi thoát chương.
     _pageSaveDebounceTimer?.cancel();
     _pageSaveDebounceTimer = null;
@@ -1428,32 +1550,33 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     _windowsCanvasController.dispose();
     super.dispose();
   }
-
   // ============================================================
   // ĐIỀU HƯỚNG CHƯƠNG
   // ============================================================
   void updateNextPrev() {
     index = chapters.indexWhere(
-      (item) => chapterIdOf(item) == currentChapterId,
+          (item) => chapterIdOf(item) == currentChapterId,
     );
     if (index == -1) {
       nextId = null;
       prevId = null;
       return;
     }
-    prevId = index > 0 ? chapterIdOf(chapters[index - 1]) : null;
+    prevId =
+    index > 0 ? chapterIdOf(chapters[index - 1]) : null;
     nextId = index < chapters.length - 1
         ? chapterIdOf(chapters[index + 1])
         : null;
   }
-
   Future<void> saveLastRead(int chapterId) async {
     final prefs = await AppPreferences.getInstance();
     await prefs.setInt('lastStoryId', storyId);
     await prefs.setInt('lastChapterId', chapterId);
-    await prefs.setString('lastReadCreatedById', currentSource);
+    await prefs.setString(
+      'lastReadCreatedById',
+      currentSource,
+    );
   }
-
   /// Lưu trang hiện tại đang đọc của chương (theo storyId + chapterId)
   /// để khi đọc tiếp có thể nhảy đúng trang đó. Gọi trực tiếp (không debounce).
   Future<void> _savePageProgress(int page) async {
@@ -1477,13 +1600,10 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       debugPrint('Không thể lưu tiến độ trang: $e');
     }
   }
-
   /// Gọi lưu tiến độ trang với debounce (mặc định 600ms) để tránh gửi quá
   /// nhiều request khi người đọc vuốt trang liên tiếp.
-  void _savePageProgressDebounced(
-    int page, {
-    Duration delay = const Duration(milliseconds: 500),
-  }) {
+  void _savePageProgressDebounced(int page,
+      {Duration delay = const Duration(milliseconds: 500)}) {
     if (page < 1 || storyId <= 0 || currentChapterId <= 0) return;
     _pageSaveDebounceTimer?.cancel();
     _pageSaveDebounceTimer = Timer(delay, () {
@@ -1492,7 +1612,6 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       _savePageProgress(page);
     });
   }
-
   /// Đọc trang đã lưu của chương (nếu có), trả về null nếu chưa có.
   Future<int?> _loadSavedPage(int chapterId) async {
     if (storyId <= 0) return null;
@@ -1506,7 +1625,6 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       return null;
     }
   }
-
   /// Nút điều hướng chương luôn chuyển chương, không phụ thuộc chế độ đọc.
   void goNext() {
     if (loading) return;
@@ -1515,14 +1633,14 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     } else {
       showDialog<void>(
         context: context,
-        builder: (_) => const AlertDialog(
+        builder: (_) =>
+        const AlertDialog(
           title: Text('Thông báo'),
           content: Text('Đây là chương cuối rồi'),
         ),
       );
     }
   }
-
   /// Chuyển về chương trước và mở tại ảnh cuối của chương đó.
   void goPrev() {
     if (loading) return;
@@ -1530,7 +1648,6 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       fetchChapter(prevId!, openAtLastPage: true);
     }
   }
-
   /// Nhảy một trang/ảnh trong chương. Chỉ khi đã ở biên mới chuyển chương.
   void goNextPage() {
     if (loading || totalPages <= 0) return;
@@ -1551,7 +1668,6 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     }
     goNext();
   }
-
   void goPrevPage() {
     if (loading || totalPages <= 0) return;
     if (currentPage > 1) {
@@ -1571,7 +1687,6 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     }
     goPrev();
   }
-
   void handleReaderTap(TapUpDetails details, double width, {double? tapY}) {
     if (loading || width <= 0) return;
     if (!tapNavigationEnabled) return;
@@ -1646,36 +1761,192 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     return nearestPage;
   }
 
+  /// Hủy neo khi người đọc chủ động cuộn hoặc bắt đầu một lần nhảy mới.
+  void _clearScrollAnchor() {
+    _scrollAnchorImageIndex = null;
+    _scrollAnchorChapterId = 0;
+    _scrollAnchorViewportOffset = 0.0;
+    _scrollAnchorAlignBottom = false;
+    _scrollAnchorCorrectionScheduled = false;
+  }
+
+  /// Bật neo sau khi trang đích đã được căn vào viewport.
+  void _activateScrollAnchor(
+      int imageIndex, {
+        bool alignBottom = false,
+      }) {
+    if (!mounted || isWindows || usePageMode) return;
+    if (imageIndex < 0 || imageIndex >= _imageKeys.length) return;
+
+    final imageObject =
+    _imageKeys[imageIndex].currentContext?.findRenderObject();
+    final viewportObject = _listViewKey.currentContext?.findRenderObject();
+    if (imageObject is! RenderBox ||
+        !imageObject.hasSize ||
+        viewportObject is! RenderBox ||
+        !viewportObject.hasSize) {
+      return;
+    }
+
+    final imageTop = imageObject.localToGlobal(Offset.zero).dy;
+    final imageBottom = imageTop + imageObject.size.height;
+    final viewportTop = viewportObject.localToGlobal(Offset.zero).dy;
+    final viewportBottom = viewportTop + viewportObject.size.height;
+    _scrollAnchorImageIndex = imageIndex;
+    _scrollAnchorChapterId = currentChapterId;
+    _scrollAnchorAlignBottom = alignBottom;
+    _scrollAnchorViewportOffset = alignBottom
+        ? imageBottom - viewportBottom
+        : imageTop - viewportTop;
+  }
+
+  /// Ảnh phía trước trang neo vừa thay đổi chiều cao. Đo lại vị trí trang neo
+  /// sau layout rồi bù scroll offset đúng bằng độ lệch đó.
+  void _scheduleScrollAnchorCorrection() {
+    final anchorIndex = _scrollAnchorImageIndex;
+    final chapterId = _scrollAnchorChapterId;
+    if (anchorIndex == null || chapterId != currentChapterId ||
+        !scrollController.hasClients || isWindows || usePageMode ||
+        _scrollAnchorCorrectionScheduled) {
+      return;
+    }
+
+    _scrollAnchorCorrectionScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollAnchorCorrectionScheduled = false;
+      if (!mounted || chapterId != currentChapterId ||
+          anchorIndex != _scrollAnchorImageIndex ||
+          !scrollController.hasClients) {
+        return;
+      }
+
+      if (anchorIndex < 0 || anchorIndex >= _imageKeys.length) return;
+      final anchorObject =
+      _imageKeys[anchorIndex].currentContext?.findRenderObject();
+      final viewportObject = _listViewKey.currentContext?.findRenderObject();
+      if (anchorObject is! RenderBox || !anchorObject.hasSize ||
+          viewportObject is! RenderBox || !viewportObject.hasSize) {
+        return;
+      }
+
+      final anchorTop = anchorObject.localToGlobal(Offset.zero).dy;
+      final anchorBottom = anchorTop + anchorObject.size.height;
+      final viewportTop = viewportObject.localToGlobal(Offset.zero).dy;
+      final viewportBottom = viewportTop + viewportObject.size.height;
+      final actualOffset = _scrollAnchorAlignBottom
+          ? anchorBottom - viewportBottom
+          : anchorTop - viewportTop;
+      final correction = actualOffset - _scrollAnchorViewportOffset;
+      if (correction.abs() < 0.5) return;
+
+      final position = scrollController.position;
+      final correctedPixels = (position.pixels + correction)
+          .clamp(position.minScrollExtent, position.maxScrollExtent)
+          .toDouble();
+      if ((correctedPixels - position.pixels).abs() >= 0.5) {
+        // jumpTo không tạo animation nên trang neo được giữ ổn định ngay ở frame này.
+        scrollController.jumpTo(correctedPixels);
+      }
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  /// Callback khi ảnh đã tải xong. Không chờ ảnh phía trước; nếu ảnh nằm trước
+  /// trang neo thì bù scroll offset để giữ nguyên vị trí trang neo.
+  void _onReaderImageLoadFinished(int imageIndex, int chapterIdAtBuild) {
+    if (!mounted || chapterIdAtBuild != currentChapterId) return;
+
+    final anchorIndex = _scrollAnchorImageIndex;
+    if (anchorIndex != null &&
+        (imageIndex < anchorIndex ||
+            (_scrollAnchorAlignBottom && imageIndex == anchorIndex))) {
+      _scheduleScrollAnchorCorrection();
+    }
+  }
+
+  /// Trang đích đã được dựng: căn ngay lập tức, không đợi các ảnh phía trước.
+  /// alignBottom=true dùng khi lùi chương để cố định mép dưới trang cuối.
+  void _waitForPreviousImagesAndAlign(
+      int imageIndex, {
+        required int requestId,
+        required bool animate,
+        bool alignBottom = false,
+        VoidCallback? onCompleted,
+      }) {
+    if (!mounted || requestId != _jumpToImageRequestId) return;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || requestId != _jumpToImageRequestId) return;
+      if (imageIndex < 0 || imageIndex >= _imageKeys.length) {
+        onCompleted?.call();
+        return;
+      }
+
+      final imageContext = _imageKeys[imageIndex].currentContext;
+      if (imageContext == null) {
+        final direction = imageIndex + 1 >= currentPage ? 1.0 : -1.0;
+        _tryBuildAndJumpToImage(
+          imageIndex,
+          requestId: requestId,
+          direction: direction,
+          animate: animate,
+          alignBottom: alignBottom,
+          onCompleted: onCompleted,
+        );
+        return;
+      }
+
+      _alignImageTopToViewport(
+        imageContext,
+        anchorImageIndex: imageIndex,
+        animate: animate,
+        alignBottom: alignBottom,
+        onCompleted: () {
+          if (!mounted || requestId != _jumpToImageRequestId) return;
+          onCompleted?.call();
+        },
+      );
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
   void _jumpToImage(
-    int imageIndex, {
-    bool animate = false,
-    VoidCallback? onCompleted,
-  }) {
+      int imageIndex, {
+        bool animate = false,
+        bool alignBottom = false,
+        VoidCallback? onCompleted,
+      }) {
     if (imageIndex < 0 || imageIndex >= _imageKeys.length) {
       onCompleted?.call();
       return;
     }
 
     final requestId = ++_jumpToImageRequestId;
+    _clearScrollAnchor();
 
     if (isWindows && !usePageMode) {
-      final imageObject = _imageKeys[imageIndex].currentContext
-          ?.findRenderObject();
-      final viewportObject = _readerViewportKey.currentContext
-          ?.findRenderObject();
+      final imageObject =
+      _imageKeys[imageIndex].currentContext?.findRenderObject();
+      final viewportObject =
+      _readerViewportKey.currentContext?.findRenderObject();
 
       if (imageObject is RenderBox &&
           imageObject.hasSize &&
           viewportObject is RenderBox &&
           viewportObject.hasSize) {
         final imageTop = imageObject.localToGlobal(Offset.zero).dy;
+        final imageBottom = imageTop + imageObject.size.height;
         final viewportTop = viewportObject.localToGlobal(Offset.zero).dy;
+        final viewportBottom = viewportTop + viewportObject.size.height;
+        final verticalDelta = alignBottom
+            ? viewportBottom - imageBottom
+            : viewportTop - imageTop;
 
         final matrix = _windowsCanvasController.value.clone();
         final translation = matrix.getTranslation();
         matrix.setTranslationRaw(
           translation.x,
-          translation.y + viewportTop - imageTop,
+          translation.y + verticalDelta,
           0,
         );
         _applyWindowsCanvasMatrix(matrix, updateScale: false);
@@ -1695,19 +1966,21 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       requestId: requestId,
       direction: direction,
       animate: animate,
+      alignBottom: alignBottom,
       onCompleted: onCompleted,
     );
   }
 
-  /// Tìm trang đích trong ListView.builder và chỉ báo hoàn tất sau khi đã
-  /// căn ảnh vào viewport. Không để tiến độ đọc cập nhật trong lúc đang dò.
+  /// Tìm trang đích trong ListView.builder và căn ảnh vào viewport.
+  /// Ảnh phía trước tải muộn sẽ được xử lý bằng scroll anchoring.
   void _tryBuildAndJumpToImage(
-    int imageIndex, {
-    required int requestId,
-    required double direction,
-    required bool animate,
-    VoidCallback? onCompleted,
-  }) {
+      int imageIndex, {
+        required int requestId,
+        required double direction,
+        required bool animate,
+        bool alignBottom = false,
+        VoidCallback? onCompleted,
+      }) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || requestId != _jumpToImageRequestId) return;
       if (imageIndex < 0 || imageIndex >= _imageKeys.length) {
@@ -1717,13 +1990,12 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
 
       final imageContext = _imageKeys[imageIndex].currentContext;
       if (imageContext != null) {
-        _alignImageTopToViewport(
-          imageContext,
+        _waitForPreviousImagesAndAlign(
+          imageIndex,
+          requestId: requestId,
           animate: animate,
-          onCompleted: () {
-            if (!mounted || requestId != _jumpToImageRequestId) return;
-            onCompleted?.call();
-          },
+          alignBottom: alignBottom,
+          onCompleted: onCompleted,
         );
         return;
       }
@@ -1740,6 +2012,7 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
           requestId: requestId,
           direction: direction,
           animate: animate,
+          alignBottom: alignBottom,
           onCompleted: onCompleted,
         );
         return;
@@ -1763,6 +2036,7 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
         requestId: requestId,
         direction: direction,
         animate: animate,
+        alignBottom: alignBottom,
         onCompleted: onCompleted,
       );
     });
@@ -1771,13 +2045,15 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     WidgetsBinding.instance.ensureVisualUpdate();
   }
 
-  /// Đưa mép trên của ảnh trùng với mép trên viewport, không dùng khoảng
-  /// cuộn cố định theo chiều cao màn hình.
+  /// Căn mép trên hoặc mép dưới của ảnh vào cạnh tương ứng của viewport.
+  /// Lùi chương dùng mép dưới để trang cuối nằm sát đáy vùng đọc.
   void _alignImageTopToViewport(
-    BuildContext imageContext, {
-    required bool animate,
-    VoidCallback? onCompleted,
-  }) {
+      BuildContext imageContext, {
+        required int anchorImageIndex,
+        required bool animate,
+        bool alignBottom = false,
+        VoidCallback? onCompleted,
+      }) {
     if (!mounted || !scrollController.hasClients) {
       onCompleted?.call();
       return;
@@ -1795,16 +2071,22 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     }
 
     final imageTop = imageObject.localToGlobal(Offset.zero).dy;
+    final imageBottom = imageTop + imageObject.size.height;
     final viewportTop = viewportObject.localToGlobal(Offset.zero).dy;
+    final viewportBottom = viewportTop + viewportObject.size.height;
     final position = scrollController.position;
 
-    final targetOffset = (position.pixels + imageTop - viewportTop)
-        .clamp(0.0, position.maxScrollExtent)
+    final alignmentDelta = alignBottom
+        ? imageBottom - viewportBottom
+        : imageTop - viewportTop;
+    final targetOffset = (position.pixels + alignmentDelta)
+        .clamp(position.minScrollExtent, position.maxScrollExtent)
         .toDouble();
 
     if ((targetOffset - position.pixels).abs() < 0.5) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
+        _activateScrollAnchor(anchorImageIndex, alignBottom: alignBottom);
         updateReadingProgress();
         onCompleted?.call();
       });
@@ -1813,21 +2095,21 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     }
 
     if (animate) {
-      scrollController
-          .animateTo(
-            targetOffset,
-            duration: const Duration(milliseconds: 220),
-            curve: Curves.easeOutCubic,
-          )
-          .whenComplete(() {
-            if (!mounted) return;
-            updateReadingProgress();
-            onCompleted?.call();
-          });
+      scrollController.animateTo(
+        targetOffset,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+      ).whenComplete(() {
+        if (!mounted) return;
+        _activateScrollAnchor(anchorImageIndex, alignBottom: alignBottom);
+        updateReadingProgress();
+        onCompleted?.call();
+      });
     } else {
       scrollController.jumpTo(targetOffset);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
+        _activateScrollAnchor(anchorImageIndex, alignBottom: alignBottom);
         updateReadingProgress();
         onCompleted?.call();
       });
@@ -1845,12 +2127,10 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     final object = _readerViewportKey.currentContext?.findRenderObject();
     return object is RenderBox && object.hasSize ? object.size : Size.zero;
   }
-
   Size _windowsCanvasContentSize() {
     final object = _windowsCanvasKey.currentContext?.findRenderObject();
     return object is RenderBox && object.hasSize ? object.size : Size.zero;
   }
-
   Matrix4 _clampWindowsCanvasMatrix(Matrix4 source) {
     final viewport = _windowsCanvasViewportSize();
     final content = _windowsCanvasContentSize();
@@ -1878,7 +2158,6 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     );
     return matrix;
   }
-
   void _applyWindowsCanvasMatrix(Matrix4 matrix, {bool updateScale = true}) {
     if (!isWindows || !mounted) return;
     final clamped = _clampWindowsCanvasMatrix(matrix);
@@ -1894,16 +2173,19 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     }
     _scheduleReadingProgressUpdate();
   }
-
   void _translateWindowsCanvas(double dx, double dy) {
     if (!isWindows || usePageMode) return;
     final matrix = _windowsCanvasController.value.clone();
     final translation = matrix.getTranslation();
-    matrix.setTranslationRaw(translation.x + dx, translation.y + dy, 0);
+    matrix.setTranslationRaw(
+      translation.x + dx,
+      translation.y + dy,
+      0,
+    );
     _applyWindowsCanvasMatrix(matrix, updateScale: false);
   }
-
   void scrollBy(double offset) {
+    _clearScrollAnchor();
     if (isWindows && !usePageMode) {
       _translateWindowsCanvas(0, -offset * scrollSensitivity);
       return;
@@ -1911,7 +2193,8 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     if (!scrollController.hasClients) return;
     if (usePageMode && totalPages > 0) return;
     final position = scrollController.position;
-    final adjustedOffset = isWindows ? offset * scrollSensitivity : offset;
+    final adjustedOffset =
+    isWindows ? offset * scrollSensitivity : offset;
     final target = (scrollController.offset + adjustedOffset)
         .clamp(0.0, position.maxScrollExtent)
         .toDouble();
@@ -1921,8 +2204,8 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       curve: Curves.easeOut,
     );
   }
-
   void scrollByWheel(double delta) {
+    _clearScrollAnchor();
     if (!isWindows) return;
     if (!usePageMode) {
       _translateWindowsCanvas(0, -delta * scrollSensitivity);
@@ -1937,7 +2220,6 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       scrollController.jumpTo(target);
     }
   }
-
   void scrollHorizontallyByWheel(double delta) {
     if (!isWindows) return;
     if (!usePageMode) {
@@ -1953,7 +2235,6 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       _horizontalScrollController.jumpTo(target);
     }
   }
-
   void handlePointerSignal(PointerSignalEvent event) {
     if (!isWindows || event is! PointerScrollEvent) return;
     final delta = event.scrollDelta.dy;
@@ -1966,7 +2247,7 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       }
       final useHorizontalScroll =
           HardwareKeyboard.instance.isShiftPressed ||
-          horizontalDelta.abs() > 0.0;
+              horizontalDelta.abs() > 0.0;
       if (useHorizontalScroll) {
         scrollHorizontallyByWheel(
           horizontalDelta.abs() > 0.0 ? horizontalDelta : delta,
@@ -2017,21 +2298,22 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       ..multiply(oldMatrix);
     _applyWindowsCanvasMatrix(nextMatrix);
   }
-
   // ============================================================
   // ZOOM MOBILE
   // ============================================================
   void onTransformChanged() {
-    final zoomed = transformController.value.getMaxScaleOnAxis() > 1.01;
+    final zoomed =
+        transformController.value.getMaxScaleOnAxis() > 1.01;
     if (zoomed != _mobileZoomed && mounted) {
       setState(() {
         _mobileZoomed = zoomed;
       });
     }
   }
-
   void handleMobilePointerMove(PointerMoveEvent event) {
-    if (!isMobile || !_mobileZoomed || _activePointers.length != 1) {
+    if (!isMobile ||
+        !_mobileZoomed ||
+        _activePointers.length != 1) {
       return;
     }
     final size = _mobileViewport;
@@ -2041,14 +2323,19 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     final translation = matrix.getTranslation();
     final minX = size.width - size.width * scale;
     final minY = size.height - size.height * scale;
-    final newX = (translation.x + event.delta.dx).clamp(minX, 0.0).toDouble();
+    final newX =
+    (translation.x + event.delta.dx)
+        .clamp(minX, 0.0)
+        .toDouble();
     final dy = event.delta.dy;
     final desiredY = translation.y + dy;
-    final newY = desiredY.clamp(minY, 0.0).toDouble();
+    final newY =
+    desiredY.clamp(minY, 0.0).toDouble();
     final leftover = desiredY - newY;
     if (leftover != 0 && scrollController.hasClients) {
       final pos = scrollController.position;
-      final target = (scrollController.offset - leftover / scale)
+      final target =
+      (scrollController.offset - leftover / scale)
           .clamp(0.0, pos.maxScrollExtent)
           .toDouble();
       scrollController.jumpTo(target);
@@ -2056,15 +2343,16 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     matrix.setTranslationRaw(newX, newY, 0);
     transformController.value = matrix;
   }
-
   // ============================================================
   // BÀN PHÍM
   // ============================================================
-  KeyEventResult handleKeyboardEvent(FocusNode node, KeyEvent event) {
+  KeyEventResult handleKeyboardEvent(FocusNode node,
+      KeyEvent event,) {
     if (isWindows &&
         (event.logicalKey == LogicalKeyboardKey.controlLeft ||
             event.logicalKey == LogicalKeyboardKey.controlRight)) {
-      final isPressed = event is KeyDownEvent || event is KeyRepeatEvent;
+      final isPressed =
+          event is KeyDownEvent || event is KeyRepeatEvent;
       if (_isCtrlZooming != isPressed && mounted) {
         setState(() {
           _isCtrlZooming = isPressed;
@@ -2075,7 +2363,8 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       }
       return KeyEventResult.handled;
     }
-    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+    if (event is! KeyDownEvent &&
+        event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
     switch (event.logicalKey) {
@@ -2095,7 +2384,6 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
         return KeyEventResult.ignored;
     }
   }
-
   void handleFocusChange(bool hasFocus) {
     if (hasFocus) return;
     if (_isCtrlZooming && mounted) {
@@ -2105,12 +2393,13 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       _scheduleReadingProgressUpdate();
     }
   }
-
   // ============================================================
   // SIDEBAR WINDOWS
   // ============================================================
   Widget buildWindowsSidebar() {
-    final colorScheme = Theme.of(context).colorScheme;
+    final colorScheme = Theme
+        .of(context)
+        .colorScheme;
     return Container(
       width: 64,
       color: colorScheme.surfaceContainer,
@@ -2126,13 +2415,17 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
             IconButton(
               tooltip: 'Về trang chủ',
               onPressed: () {
-                Navigator.popUntil(context, (route) => route.isFirst);
+                Navigator.popUntil(
+                  context,
+                      (route) => route.isFirst,
+                );
               },
               icon: const Icon(Icons.home),
             ),
             IconButton(
               tooltip: 'Danh sách chương',
-              onPressed: () => _scaffoldKey.currentState?.openDrawer(),
+              onPressed: () =>
+                  _scaffoldKey.currentState?.openDrawer(),
               icon: const Icon(Icons.menu_book),
             ),
             const Divider(),
@@ -2149,7 +2442,6 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       ),
     );
   }
-
   // ============================================================
   // ẢNH BÌA
   // ============================================================
@@ -2161,11 +2453,14 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
           'cover/$coverUrl',
         ),
         builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
+          if (snapshot.connectionState ==
+              ConnectionState.waiting) {
             return const SizedBox(
               width: 80,
               height: 110,
-              child: Center(child: CircularProgressIndicator()),
+              child: Center(
+                child: CircularProgressIndicator(),
+              ),
             );
           }
           final file = snapshot.data;
@@ -2175,7 +2470,8 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
             width: 80,
             height: 110,
             fit: BoxFit.cover,
-            errorBuilder: (_, __, ___) => coverPlaceholder(),
+            errorBuilder: (_, __, ___) =>
+                coverPlaceholder(),
           );
         },
       );
@@ -2188,22 +2484,23 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       errorWidget: (_, __, ___) => coverPlaceholder(),
     );
   }
-
   Widget coverPlaceholder() {
-    return const SizedBox(width: 80, height: 110, child: Icon(Icons.book));
+    return const SizedBox(
+      width: 80,
+      height: 110,
+      child: Icon(Icons.book),
+    );
   }
-
   // ============================================================
   // NỘI DUNG BLOCK
   // ============================================================
-  Widget buildBlock(
-    dynamic block,
-    int blockIndex,
-    double effectiveZoom,
-    double contentWidth, {
-    bool pageMode = false,
-    double pageHeight = 0,
-  }) {
+  Widget buildBlock(dynamic block,
+      int blockIndex,
+      double effectiveZoom,
+      double contentWidth, {
+        bool pageMode = false,
+        double pageHeight = 0,
+      }) {
     if (block is! Map) {
       return const SizedBox.shrink();
     }
@@ -2215,53 +2512,58 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
         ),
         child: Text(
           block['data']?.toString() ?? '',
-          style: TextStyle(fontSize: 18 * effectiveZoom, height: 1.5),
+          style: TextStyle(
+            fontSize: 18 * effectiveZoom,
+            height: 1.5,
+          ),
         ),
       );
     }
     if (block['type'] == 'image') {
-      final imageIndex = _imageIndexByBlockIndex[blockIndex];
-      if (imageIndex < 0 || imageIndex >= _imageKeys.length) {
+      final imageIndex =
+      _imageIndexByBlockIndex[blockIndex];
+      if (imageIndex < 0 ||
+          imageIndex >= _imageKeys.length) {
         return const SizedBox.shrink();
       }
-      final imageName = block['data']?.toString() ?? '';
+      final imageName =
+          block['data']?.toString() ?? '';
       // Không trì hoãn tải ảnh theo vị trí cuộn/trang hiện tại.
       const shouldLoad = true;
+      final imageChapterId = currentChapterId;
       return _ReaderChapterImage(
         key: _imageKeys[imageIndex],
         storyId: storyId,
         imageName: imageName,
-        imageUrl: '${ApiConfig.chapterImage}/$imageName',
+        imageUrl:
+        '${ApiConfig.chapterImage}/$imageName',
         offline: useOfflineImages,
         shouldLoad: shouldLoad,
         width: contentWidth,
         pageMode: pageMode,
         fitToPage: effectiveZoom <= 1.0001,
         pageHeight: pageHeight,
-        onLoadFinished: null,
+        onLoadFinished: () => _onReaderImageLoadFinished(
+          imageIndex,
+          imageChapterId,
+        ),
       );
     }
     return const SizedBox.shrink();
   }
-
   // ============================================================
   // CHẾ ĐỘ CUỘN LIÊN TỤC
   // ============================================================
-  Widget buildScrollContent(
-    double availableWidth,
-    double availableHeight,
-    double contentWidth,
-    double effectiveZoom,
-  ) {
+  Widget buildScrollContent(double availableWidth,
+      double availableHeight,
+      double contentWidth,
+      double effectiveZoom,) {
     return LayoutBuilder(
       builder: (context, constraints) {
         return GestureDetector(
           behavior: HitTestBehavior.translucent,
-          onTapUp: (details) => handleReaderTap(
-            details,
-            constraints.maxWidth,
-            tapY: details.globalPosition.dy,
-          ),
+          onTapUp: (details) =>
+              handleReaderTap(details, constraints.maxWidth, tapY: details.globalPosition.dy),
           child: SizedBox.expand(
             child: Center(
               child: SizedBox(
@@ -2270,34 +2572,40 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
                 child: Align(
                   alignment: Alignment.topCenter,
                   child: AbsorbPointer(
-                    absorbing:
-                        (isWindows && _isCtrlZooming) ||
+                    absorbing: (isWindows && _isCtrlZooming) ||
                         (isMobile &&
                             (_mobileZoomed || _activePointers.length >= 2)),
-                    child: ListView.builder(
-                      key: _listViewKey,
-                      controller: scrollController,
-                      physics:
-                          (isWindows ||
-                              (isMobile &&
-                                  (_mobileZoomed ||
-                                      _activePointers.length >= 2)))
-                          ? const NeverScrollableScrollPhysics()
-                          : const AlwaysScrollableScrollPhysics(),
-                      padding: EdgeInsets.zero,
-                      cacheExtent: 1200,
-                      itemCount: blocks.length,
-                      itemBuilder: (context, i) {
-                        return SizedBox(
-                          width: contentWidth,
-                          child: buildBlock(
-                            blocks[i],
-                            i,
-                            effectiveZoom,
-                            contentWidth,
-                          ),
-                        );
+                    child: NotificationListener<ScrollStartNotification>(
+                      onNotification: (notification) {
+                        // Người đọc tự kéo danh sách: không tiếp tục neo trang cũ.
+                        if (notification.dragDetails != null) {
+                          _clearScrollAnchor();
+                        }
+                        return false;
                       },
+                      child: ListView.builder(
+                        key: _listViewKey,
+                        controller: scrollController,
+                        physics: (isWindows ||
+                            (isMobile &&
+                                (_mobileZoomed || _activePointers.length >= 2)))
+                            ? const NeverScrollableScrollPhysics()
+                            : const AlwaysScrollableScrollPhysics(),
+                        padding: EdgeInsets.zero,
+                        cacheExtent: 1200,
+                        itemCount: blocks.length,
+                        itemBuilder: (context, i) {
+                          return SizedBox(
+                            width: contentWidth,
+                            child: buildBlock(
+                              blocks[i],
+                              i,
+                              effectiveZoom,
+                              contentWidth,
+                            ),
+                          );
+                        },
+                      ),
                     ),
                   ),
                 ),
@@ -2308,17 +2616,16 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       },
     );
   }
-
   // ============================================================
   // CHẾ ĐỘ ĐỌC TỪNG TRANG
   // ============================================================
-  Widget buildSinglePageContent(
-    double contentWidth,
-    double effectiveZoom,
-    double availableHeight,
-  ) {
+  Widget buildSinglePageContent(double contentWidth,
+      double effectiveZoom,
+      double availableHeight,) {
     if (totalPages == 0) {
-      return const Center(child: Text('Chương này không có ảnh.'));
+      return const Center(
+        child: Text('Chương này không có ảnh.'),
+      );
     }
     return SizedBox.expand(
       child: PageView.builder(
@@ -2330,7 +2637,8 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
         itemCount: totalPages,
         onPageChanged: onPageChanged,
         itemBuilder: (context, pageIndex) {
-          final blockIndex = _imageBlockIndexes[pageIndex];
+          final blockIndex =
+          _imageBlockIndexes[pageIndex];
           return LayoutBuilder(
             builder: (context, constraints) {
               return GestureDetector(
@@ -2356,15 +2664,12 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       ),
     );
   }
-
   // ============================================================
   // DỰNG NỘI DUNG CHƯƠNG
   // ============================================================
-  Widget buildWindowsCanvas(
-    double availableWidth,
-    double availableHeight,
-    double baseContentWidth,
-  ) {
+  Widget buildWindowsCanvas(double availableWidth,
+      double availableHeight,
+      double baseContentWidth,) {
     return InteractiveViewer(
       transformationController: _windowsCanvasController,
       constrained: false,
@@ -2400,7 +2705,6 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       ),
     );
   }
-
   Widget buildChapterContent() {
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -2409,12 +2713,14 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
         final desiredWidth = (availableHeight * 0.7)
             .clamp(320.0, 900.0)
             .toDouble();
-        final baseContentWidth = desiredWidth < availableWidth
+        final baseContentWidth =
+        desiredWidth < availableWidth
             ? desiredWidth
             : availableWidth;
         lastAvailableWidth = availableWidth;
         lastBaseContentWidth = baseContentWidth;
-        final effectiveZoom = isWindows ? zoomScale : 1.0;
+        final effectiveZoom =
+        isWindows ? zoomScale : 1.0;
         if (isWindows) {
           // Không giới hạn zoom theo kích thước fit của cửa sổ.
           // Người đọc có thể phóng to đến maxZoomLimit trên mọi màn hình.
@@ -2431,7 +2737,8 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
             ),
           );
         }
-        final contentWidth = (baseContentWidth * effectiveZoom)
+        final contentWidth =
+        (baseContentWidth * effectiveZoom)
             .clamp(1.0, 5000.0)
             .toDouble();
         return SizedBox(
@@ -2447,16 +2754,16 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
                 height: availableHeight,
                 child: usePageMode
                     ? buildSinglePageContent(
-                        contentWidth,
-                        effectiveZoom,
-                        availableHeight,
-                      )
+                  contentWidth,
+                  effectiveZoom,
+                  availableHeight,
+                )
                     : buildScrollContent(
-                        availableWidth,
-                        availableHeight,
-                        contentWidth,
-                        effectiveZoom,
-                      ),
+                  availableWidth,
+                  availableHeight,
+                  contentWidth,
+                  effectiveZoom,
+                ),
               ),
             ),
           ),
@@ -2464,7 +2771,6 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       },
     );
   }
-
   // ============================================================
   // VÙNG ĐỌC THEO NỀN TẢNG
   // ============================================================
@@ -2481,7 +2787,10 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     if (isMobile) {
       return LayoutBuilder(
         builder: (context, constraints) {
-          _mobileViewport = Size(constraints.maxWidth, constraints.maxHeight);
+          _mobileViewport = Size(
+            constraints.maxWidth,
+            constraints.maxHeight,
+          );
           return Listener(
             behavior: HitTestBehavior.opaque,
             onPointerDown: (e) {
@@ -2497,21 +2806,28 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
             onPointerUp: (e) {
               final wasMultiTouch = _activePointers.length >= 2;
               _activePointers.remove(e.pointer);
-              if (wasMultiTouch && _activePointers.length < 2 && mounted) {
+              if (wasMultiTouch &&
+                  _activePointers.length < 2 &&
+                  mounted) {
                 setState(() {});
               }
             },
             onPointerCancel: (e) {
               final wasMultiTouch = _activePointers.length >= 2;
               _activePointers.remove(e.pointer);
-              if (wasMultiTouch && _activePointers.length < 2 && mounted) {
+              if (wasMultiTouch &&
+                  _activePointers.length < 2 &&
+                  mounted) {
                 setState(() {});
               }
             },
             onPointerMove: handleMobilePointerMove,
             child: InteractiveViewer(
-              key: ValueKey('mobile-reader-$currentChapterId'),
-              transformationController: transformController,
+              key: ValueKey(
+                'mobile-reader-$currentChapterId',
+              ),
+              transformationController:
+              transformController,
               minScale: 1.0,
               maxScale: maxZoomLimit,
               scaleEnabled: true,
@@ -2531,13 +2847,15 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     }
     return content;
   }
-
   // ============================================================
   // THANH ĐIỀU HƯỚNG DƯỚI
   // ============================================================
   Widget buildBottomNavigationBar() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      padding: const EdgeInsets.symmetric(
+        horizontal: 16,
+        vertical: 10,
+      ),
       color: Colors.black87,
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -2547,19 +2865,51 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
             children: [
               IconButton(
                 onPressed: loading ? null : goPrev,
-                icon: const Icon(Icons.arrow_back, color: Colors.white),
+                icon: const Icon(
+                  Icons.arrow_back,
+                  color: Colors.white,
+                ),
                 tooltip: 'Chương trước',
               ),
               IconButton(
                 onPressed: _showCommentDialog,
-                icon: const Icon(Icons.comment, color: Colors.white),
-                tooltip: 'Bình luận',
+                icon: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    const Icon(Icons.comment, color: Colors.white),
+                    if (commentCount > 0)
+                      Positioned(
+                        right: -4,
+                        top: -4,
+                        child: Container(
+                          padding: const EdgeInsets.all(2),
+                          decoration: BoxDecoration(
+                            color: Colors.red,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                          child: Text(
+                            commentCount > 99 ? '99+' : commentCount.toString(),
+                            style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+                tooltip: 'Bình luận ($commentCount)',
               ),
               IconButton(
                 onPressed: () {
-                  Navigator.popUntil(context, (route) => route.isFirst);
+                  Navigator.popUntil(
+                    context,
+                        (route) => route.isFirst,
+                  );
                 },
-                icon: const Icon(Icons.home, color: Colors.white),
+                icon: const Icon(
+                  Icons.home,
+                  color: Colors.white,
+                ),
                 tooltip: 'Về trang chủ',
               ),
             ],
@@ -2584,13 +2934,20 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
             mainAxisSize: MainAxisSize.min,
             children: [
               IconButton(
-                onPressed: () => _scaffoldKey.currentState?.openDrawer(),
-                icon: const Icon(Icons.menu, color: Colors.white),
+                onPressed: () =>
+                    _scaffoldKey.currentState?.openDrawer(),
+                icon: const Icon(
+                  Icons.menu,
+                  color: Colors.white,
+                ),
                 tooltip: 'Danh sách chương',
               ),
               IconButton(
                 onPressed: loading ? null : goNext,
-                icon: const Icon(Icons.arrow_forward, color: Colors.white),
+                icon: const Icon(
+                  Icons.arrow_forward,
+                  color: Colors.white,
+                ),
                 tooltip: 'Chương tiếp theo',
               ),
             ],
@@ -2599,7 +2956,6 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       ),
     );
   }
-
   // ============================================================
   // CHỌN SOURCE
   // ============================================================
@@ -2607,7 +2963,8 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
     if (sources.isEmpty) {
       return const SizedBox.shrink();
     }
-    final selectedSource = sources.contains(currentSource)
+    final selectedSource =
+    sources.contains(currentSource)
         ? currentSource
         : sources.first;
     return Padding(
@@ -2615,7 +2972,13 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Nguồn truyện', style: Theme.of(context).textTheme.titleSmall),
+          Text(
+            'Nguồn truyện',
+            style: Theme
+                .of(context)
+                .textTheme
+                .titleSmall,
+          ),
           const SizedBox(height: 8),
           DropdownButtonFormField<String>(
             key: ValueKey(selectedSource),
@@ -2629,7 +2992,8 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
               ),
             ),
             items: sources.map((source) {
-              final count = getChaptersBySource(source).length;
+              final count =
+                  getChaptersBySource(source).length;
               return DropdownMenuItem<String>(
                 value: source,
                 child: Text(
@@ -2642,16 +3006,15 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
             onChanged: loading
                 ? null
                 : (source) {
-                    if (source != null) {
-                      changeSource(source);
-                    }
-                  },
+              if (source != null) {
+                changeSource(source);
+              }
+            },
           ),
         ],
       ),
     );
   }
-
   // ============================================================
   // GIAO DIỆN
   // ============================================================
@@ -2663,18 +3026,23 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
           child: loading
               ? const CircularProgressIndicator()
               : Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.error_outline, size: 42),
-                    const SizedBox(height: 12),
-                    const Text('Không thể mở chương truyện.'),
-                    const SizedBox(height: 8),
-                    FilledButton(
-                      onPressed: initData,
-                      child: const Text('Thử lại'),
-                    ),
-                  ],
-                ),
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.error_outline,
+                size: 42,
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'Không thể mở chương truyện.',
+              ),
+              const SizedBox(height: 8),
+              FilledButton(
+                onPressed: initData,
+                child: const Text('Thử lại'),
+              ),
+            ],
+          ),
         ),
       );
     }
@@ -2687,10 +3055,12 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
             children: [
               DrawerHeader(
                 child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                  crossAxisAlignment:
+                  CrossAxisAlignment.start,
                   children: [
                     ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
+                      borderRadius:
+                      BorderRadius.circular(8),
                       child: buildCoverImage(),
                     ),
                     const SizedBox(width: 12),
@@ -2701,12 +3071,15 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
                             context,
                             MaterialPageRoute(
                               builder: (_) =>
-                                  StoryDetailScreen(storyId: storyId),
+                                  StoryDetailScreen(
+                                    storyId: storyId,
+                                  ),
                             ),
                           );
                         },
                         child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                          crossAxisAlignment:
+                          CrossAxisAlignment.start,
                           children: [
                             Text(
                               lastStoryTitle,
@@ -2715,7 +3088,8 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
                                 fontWeight: FontWeight.bold,
                               ),
                               maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
+                              overflow:
+                              TextOverflow.ellipsis,
                             ),
                             const SizedBox(height: 6),
                             Text('Ch. $lastChapterNumber'),
@@ -2723,15 +3097,21 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
                             Text(
                               'Nguồn: $currentSource',
                               maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.bodySmall,
+                              overflow:
+                              TextOverflow.ellipsis,
+                              style: Theme
+                                  .of(context)
+                                  .textTheme
+                                  .bodySmall,
                             ),
                             if (isOffline)
                               const Padding(
-                                padding: EdgeInsets.only(top: 4),
+                                padding:
+                                EdgeInsets.only(top: 4),
                                 child: Text(
                                   'Đang đọc Offline',
-                                  style: TextStyle(fontSize: 11),
+                                  style:
+                                  TextStyle(fontSize: 11),
                                 ),
                               ),
                           ],
@@ -2745,12 +3125,16 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
               if (loading)
                 const Padding(
                   padding: EdgeInsets.all(16),
-                  child: Center(child: CircularProgressIndicator()),
+                  child: Center(
+                    child: CircularProgressIndicator(),
+                  ),
                 ),
               if (!loading && chapters.isEmpty)
                 const Padding(
                   padding: EdgeInsets.all(16),
-                  child: Text('Source này chưa có chapter.'),
+                  child: Text(
+                    'Source này chưa có chapter.',
+                  ),
                 ),
               Padding(
                 padding: const EdgeInsets.symmetric(
@@ -2759,8 +3143,10 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
                 ),
                 child: GridView.builder(
                   shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  physics:
+                  const NeverScrollableScrollPhysics(),
+                  gridDelegate:
+                  const SliverGridDelegateWithFixedCrossAxisCount(
                     crossAxisCount: 3,
                     crossAxisSpacing: 8,
                     mainAxisSpacing: 8,
@@ -2769,24 +3155,39 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
                   itemCount: chapters.length,
                   itemBuilder: (context, chapterIndex) {
                     final c = chapters[chapterIndex];
-                    final selectedChapterId = chapterIdOf(c);
-                    final isCurrent = selectedChapterId == currentChapterId;
+                    final selectedChapterId =
+                    chapterIdOf(c);
+                    final isCurrent =
+                        selectedChapterId == currentChapterId;
                     return Material(
                       color: isCurrent
-                          ? Theme.of(context).colorScheme.primary
-                          : Theme.of(context).cardColor,
-                      borderRadius: BorderRadius.circular(8),
+                          ? Theme
+                          .of(context)
+                          .colorScheme
+                          .primary
+                          : Theme
+                          .of(context)
+                          .cardColor,
+                      borderRadius:
+                      BorderRadius.circular(8),
                       child: InkWell(
-                        borderRadius: BorderRadius.circular(8),
-                        onTap: loading || selectedChapterId == null
+                        borderRadius:
+                        BorderRadius.circular(8),
+                        onTap: loading ||
+                            selectedChapterId == null
                             ? null
                             : () {
-                                Navigator.pop(context);
-                                fetchChapter(selectedChapterId);
-                              },
+                          Navigator.pop(context);
+                          fetchChapter(
+                            selectedChapterId,
+                          );
+                        },
                         child: Center(
                           child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 4),
+                            padding:
+                            const EdgeInsets.symmetric(
+                              horizontal: 4,
+                            ),
                             child: Text(
                               'Ch. ${c['chapterNumber']}',
                               textAlign: TextAlign.center,
@@ -2796,10 +3197,15 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
                                     ? FontWeight.bold
                                     : FontWeight.normal,
                                 color: isCurrent
-                                    ? Theme.of(context).colorScheme.onPrimary
-                                    : Theme.of(
-                                        context,
-                                      ).textTheme.bodyMedium?.color,
+                                    ? Theme
+                                    .of(context)
+                                    .colorScheme
+                                    .onPrimary
+                                    : Theme
+                                    .of(context)
+                                    .textTheme
+                                    .bodyMedium
+                                    ?.color,
                               ),
                             ),
                           ),
@@ -2845,24 +3251,29 @@ abstract class ChapterReaderScreenStateBase<T extends StatefulWidget>
         ],
       ),
       body: loading
-          ? const Center(child: CircularProgressIndicator())
+          ? const Center(
+        child: CircularProgressIndicator(),
+      )
           : Focus(
-              focusNode: _keyboardFocusNode,
-              autofocus: true,
-              onKeyEvent: handleKeyboardEvent,
-              onFocusChange: handleFocusChange,
-              child: Row(
-                children: [
-                  if (isWindows) buildWindowsSidebar(),
-                  Expanded(child: buildReaderBody()),
-                ],
-              ),
+        focusNode: _keyboardFocusNode,
+        autofocus: true,
+        onKeyEvent: handleKeyboardEvent,
+        onFocusChange: handleFocusChange,
+        child: Row(
+          children: [
+            if (isWindows)
+              buildWindowsSidebar(),
+            Expanded(
+              child: buildReaderBody(),
             ),
-      bottomNavigationBar: isWindows ? null : buildBottomNavigationBar(),
+          ],
+        ),
+      ),
+      bottomNavigationBar:
+      isWindows ? null : buildBottomNavigationBar(),
     );
   }
 }
-
 // ============================================================
 // WIDGET ẢNH CHƯƠNG HỖ TRỢ OFFLINE
 // ============================================================
@@ -2873,17 +3284,13 @@ class _ReaderChapterImage extends StatefulWidget {
   final bool offline;
   final bool shouldLoad;
   final double width;
-
   // Chỉ bật khi đọc từng trang.
   final bool pageMode;
-
   // Chỉ fit vào trang ở mức zoom gốc; khi phóng to phải giữ nguyên tỷ lệ pixel.
   final bool fitToPage;
-
   // Chiều cao vùng hiển thị một trang.
   final double pageHeight;
   final VoidCallback? onLoadFinished;
-
   const _ReaderChapterImage({
     super.key,
     required this.storyId,
@@ -2897,19 +3304,17 @@ class _ReaderChapterImage extends StatefulWidget {
     this.pageHeight = 0,
     this.onLoadFinished,
   });
-
   @override
-  State<_ReaderChapterImage> createState() => _ReaderChapterImageState();
+  State<_ReaderChapterImage> createState() =>
+      _ReaderChapterImageState();
 }
-
 class _ReaderChapterImageState extends State<_ReaderChapterImage> {
   File? _localFile;
   bool _loadingLocalFile = false;
   bool _localLoadStarted = false;
   bool _notifiedFinished = false;
-
   @override
-  void didUpdateWidget(covariant _ReaderChapterImage oldWidget) {
+  void didUpdateWidget(covariant _ReaderChapterImage oldWidget,) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.imageName != widget.imageName ||
         oldWidget.storyId != widget.storyId ||
@@ -2920,7 +3325,6 @@ class _ReaderChapterImageState extends State<_ReaderChapterImage> {
       _notifiedFinished = false;
     }
   }
-
   void _notifyFinished() {
     if (_notifiedFinished) return;
     _notifiedFinished = true;
@@ -2930,7 +3334,6 @@ class _ReaderChapterImageState extends State<_ReaderChapterImage> {
       }
     });
   }
-
   Future<void> _loadLocalFile() async {
     if (_localLoadStarted || !widget.shouldLoad) {
       return;
@@ -2938,8 +3341,12 @@ class _ReaderChapterImageState extends State<_ReaderChapterImage> {
     _localLoadStarted = true;
     _loadingLocalFile = true;
     try {
-      final filename = widget.imageName.replaceAll('\\', '/').split('/').last;
-      final file = await OfflineEntryService.instance.getImage(
+      final filename = widget.imageName
+          .replaceAll('\\', '/')
+          .split('/')
+          .last;
+      final file =
+      await OfflineEntryService.instance.getImage(
         widget.storyId,
         'chapter/$filename',
       );
@@ -2958,15 +3365,15 @@ class _ReaderChapterImageState extends State<_ReaderChapterImage> {
       _notifyFinished();
     }
   }
-
   Widget _placeholder() {
     return SizedBox(
       width: widget.width,
       height: 220,
-      child: const Center(child: CircularProgressIndicator()),
+      child: const Center(
+        child: CircularProgressIndicator(),
+      ),
     );
   }
-
   Widget _errorWidget() {
     return SizedBox(
       width: widget.width,
@@ -2984,7 +3391,9 @@ class _ReaderChapterImageState extends State<_ReaderChapterImage> {
               widget.offline
                   ? 'Ảnh chưa có trong package Offline'
                   : 'Không thể tải ảnh',
-              style: const TextStyle(color: Colors.grey),
+              style: const TextStyle(
+                color: Colors.grey,
+              ),
             ),
             if (!widget.offline)
               TextButton(
@@ -3000,7 +3409,6 @@ class _ReaderChapterImageState extends State<_ReaderChapterImage> {
       ),
     );
   }
-
   Widget _buildImageContent() {
     if (!widget.shouldLoad) {
       return _placeholder();
@@ -3032,7 +3440,10 @@ class _ReaderChapterImageState extends State<_ReaderChapterImage> {
       width: widget.width,
       fit: BoxFit.fitWidth,
       errorBuilder: (_, __, ___) => _errorWidget(),
-      frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
+      frameBuilder: (context,
+          child,
+          frame,
+          wasSynchronouslyLoaded,) {
         if (frame != null || wasSynchronouslyLoaded) {
           _notifyFinished();
         }
@@ -3040,7 +3451,6 @@ class _ReaderChapterImageState extends State<_ReaderChapterImage> {
       },
     );
   }
-
   @override
   Widget build(BuildContext context) {
     final image = _buildImageContent();
@@ -3058,7 +3468,10 @@ class _ReaderChapterImageState extends State<_ReaderChapterImage> {
             child: FittedBox(
               fit: BoxFit.contain,
               alignment: Alignment.center,
-              child: SizedBox(width: widget.width, child: image),
+              child: SizedBox(
+                width: widget.width,
+                child: image,
+              ),
             ),
           ),
         ),
@@ -3079,7 +3492,10 @@ class _ReaderChapterImageState extends State<_ReaderChapterImage> {
             maxWidth: widget.width,
             minHeight: 0,
             maxHeight: double.infinity,
-            child: SizedBox(width: widget.width, child: image),
+            child: SizedBox(
+              width: widget.width,
+              child: image,
+            ),
           ),
         ),
       ),

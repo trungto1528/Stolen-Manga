@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:novel_app/config/api_config.dart';
 import 'package:novel_app/models/User.dart';
 import 'package:novel_app/models/metadata_provider.dart';
@@ -47,6 +48,7 @@ class _StoryDetailScreenState extends State<StoryDetailScreen> {
   bool _searchExpanded = false;
   static const int _pageSize = 20;
   int _currentPage = 0;
+  final Map<int, int> _chapterCommentCounts = {};
 
   bool get _isOffline => OfflineModeService.isOffline.value;
 
@@ -127,6 +129,7 @@ class _StoryDetailScreenState extends State<StoryDetailScreen> {
     await _loadStory();
     if (!mounted) return;
     await _checkDownloaded();
+    _loadCommentCounts();
   }
 
   // ============================================================
@@ -266,6 +269,30 @@ class _StoryDetailScreenState extends State<StoryDetailScreen> {
           ),
         ),
       );
+    }
+  }
+
+  Future<void> _loadCommentCounts() async {
+    if (_isOffline) return;
+    for (final chapter in chapters) {
+      if (chapter is! Map) continue;
+      final chapterId = chapter['id'];
+      if (chapterId == null) continue;
+      final id = (chapterId as num).toInt();
+      if (_chapterCommentCounts.containsKey(id)) continue;
+      try {
+        final uri = Uri.parse('${ApiConfig.api}/comments/chapter/$id/count');
+        final res = await http.get(uri);
+        if (res.statusCode == 200) {
+          final count = int.tryParse(res.body) ?? 0;
+          if (!mounted) return;
+          setState(() {
+            _chapterCommentCounts[id] = count;
+          });
+        }
+      } catch (e) {
+        debugPrint('Không thể tải số lượng bình luận cho chương $id: $e');
+      }
     }
   }
 
@@ -1396,6 +1423,10 @@ class _StoryDetailScreenState extends State<StoryDetailScreen> {
 
                 final source = chapter['createdBy']?.toString() ?? '';
                 final isRead = chapter['isRead'] == true;
+                final chapterId = chapter['id'];
+                final commentCount = chapterId != null
+                    ? _chapterCommentCounts[(chapterId as num).toInt()] ?? 0
+                    : 0;
 
                 return Container(
                   margin: const EdgeInsets.symmetric(
@@ -1434,16 +1465,44 @@ class _StoryDetailScreenState extends State<StoryDetailScreen> {
                       overflow: TextOverflow.ellipsis,
                     ),
                     subtitle: Text(
-                      'Source: ${source.isEmpty ? 'Không rõ' : source}',
+                      'Source: ${source.isEmpty ? 'Không rõ' : source}${commentCount > 0 ? ' · $commentCount bình luận' : ''}',
                       style: TextStyle(
                         fontSize: 13,
                         color: Colors.grey.shade600,
                       ),
                     ),
-                    trailing: Icon(
-                      isRead ? Icons.done : Icons.arrow_forward_ios_rounded,
-                      size: 16,
-                      color: isRead ? Colors.green : null,
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (commentCount > 0)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 8),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.comment_outlined,
+                                  size: 16,
+                                  color: Colors.grey.shade600,
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  commentCount > 99 ? '99+' : commentCount.toString(),
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    color: Colors.grey.shade600,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        Icon(
+                          isRead ? Icons.done : Icons.arrow_forward_ios_rounded,
+                          size: 16,
+                          color: isRead ? Colors.green : null,
+                        ),
+                      ],
                     ),
                     onTap: () => _openChapter(chapter),
                   ),
