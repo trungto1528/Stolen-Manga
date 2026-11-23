@@ -1,5 +1,6 @@
 
 import 'dart:async';
+import 'dart:io';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
@@ -8,20 +9,23 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../models/anime_part_dto.dart';
+import '../../offline/service/offline_mode_service.dart';
 import '../models/anime.dart';
 import '../providers/anime_providers.dart';
+import '../services/anime_download_service.dart';
 
 class AnimePlayerMediaKitScreen extends ConsumerStatefulWidget {
   final String animeTitle;
+  final String animeUrl;
   final List<AnimeEpisode> episodes;
   final int initialEpisodeIndex;
-
   final List<AnimePartDTO> parts;
   final String? currentPartName;
 
   const AnimePlayerMediaKitScreen({
     super.key,
     required this.animeTitle,
+    required this.animeUrl,
     required this.episodes,
     required this.initialEpisodeIndex,
     this.parts = const [],
@@ -40,6 +44,7 @@ class _AnimePlayerMediaKitScreenState
   late List<AnimeEpisode> _episodes;
   late int _currentEpisodeIndex;
 
+  late String _currentAnimeUrl;
   String? _currentPartName;
 
   bool _loading = false;
@@ -73,11 +78,17 @@ class _AnimePlayerMediaKitScreenState
     2.0,
   ];
 
+  final AnimeDownloadService _downloadService =
+      AnimeDownloadService.instance;
+
+  bool get _isOffline => OfflineModeService.isOffline.value;
+
   @override
   void initState() {
     super.initState();
 
     _episodes = List.of(widget.episodes);
+    _currentAnimeUrl = widget.animeUrl;
     _currentPartName = widget.currentPartName;
 
     if (_episodes.isEmpty) {
@@ -121,10 +132,89 @@ class _AnimePlayerMediaKitScreenState
   }
 
   // ============================================================
+  // ERROR MESSAGE
+  // ============================================================
+
+  String _getReadableError(Object error) {
+    final message = error.toString().toLowerCase();
+
+    if (error is TimeoutException ||
+        message.contains('timeoutexception') ||
+        message.contains('timed out') ||
+        message.contains('timeout')) {
+      return 'Kết nối đến nguồn phát quá thời gian. Vui lòng thử lại.';
+    }
+
+    if (error is SocketException ||
+        error is HandshakeException ||
+        message.contains('socketexception') ||
+        message.contains('failed host lookup') ||
+        message.contains('network is unreachable') ||
+        message.contains('connection refused') ||
+        message.contains('connection reset') ||
+        message.contains('connection aborted') ||
+        message.contains('no address associated') ||
+        message.contains('unable to resolve host') ||
+        message.contains('network error')) {
+      return 'Không có kết nối đến nguồn video. Vui lòng kiểm tra mạng.';
+    }
+
+    if (message.contains('404') || message.contains('not found')) {
+      return 'Không tìm thấy video này. Nguồn phát có thể đã bị xóa.';
+    }
+
+    if (message.contains('403') ||
+        message.contains('forbidden') ||
+        message.contains('unauthorized') ||
+        message.contains('401')) {
+      return 'Nguồn phát từ chối truy cập. Vui lòng thử lại sau.';
+    }
+
+    if (message.contains('500') ||
+        message.contains('502') ||
+        message.contains('503') ||
+        message.contains('504') ||
+        message.contains('server error')) {
+      return 'Máy chủ nguồn phát đang gặp sự cố. Vui lòng thử lại sau.';
+    }
+
+    if (message.contains('format') ||
+        message.contains('decoder') ||
+        message.contains('codec') ||
+        message.contains('unsupported') ||
+        message.contains('exoplayer') ||
+        message.contains('mediacodec') ||
+        message.contains('source error') ||
+        message.contains('behind live window')) {
+      return 'Không thể giải mã hoặc phát định dạng video này.';
+    }
+
+    if (message.contains('no such file') ||
+        message.contains('file not found') ||
+        message.contains('filenotfoundexception')) {
+      return 'Không tìm thấy file video đã tải xuống.';
+    }
+
+    if (message.contains('permission denied') ||
+        message.contains('access denied')) {
+      return 'Không có quyền truy cập file video.';
+    }
+
+    if (message.contains('cancelled') ||
+        message.contains('canceled')) {
+      return 'Quá trình phát video đã bị gián đoạn.';
+    }
+
+    return 'Không thể phát video này. Vui lòng thử lại hoặc chọn tập khác.';
+  }
+
+  // ============================================================
   // STREAM PRELOAD
   // ============================================================
 
-  void _preloadNextEpisode(int currentIndex) {
+  Future<void> _preloadNextEpisode(int currentIndex) async {
+    if (_isOffline) return;
+
     final nextIndex = currentIndex + 1;
 
     if (nextIndex >= _episodes.length) {
@@ -132,15 +222,35 @@ class _AnimePlayerMediaKitScreenState
     }
 
     final nextEpisode = _episodes[nextIndex];
-    final service = ref.read(animeServiceProvider);
 
-    debugPrint(
-      '[PLAYER PRELOAD] Start: Episode ${nextEpisode.number}',
-    );
+    try {
+      final downloadedFile =
+      await _downloadService.getDownloadedEpisodeFile(
+        animeTitle: widget.animeTitle,
+        animeUrl: _currentAnimeUrl,
+        episode: nextEpisode,
+      );
 
-    // Chỉ phân giải URL HLS, không khởi tạo thêm VideoPlayerController.
-    // AnimeService sẽ lưu kết quả vào cache để lần chuyển tập dùng lại.
-    unawaited(service.preloadStream(nextEpisode.url));
+      if (downloadedFile != null) {
+        debugPrint(
+          '[PLAYER PRELOAD] Skip: Episode ${nextEpisode.number} '
+              'already downloaded.',
+        );
+        return;
+      }
+
+      if (!mounted || _isOffline) return;
+
+      final service = ref.read(animeServiceProvider);
+
+      debugPrint(
+        '[PLAYER PRELOAD] Start: Episode ${nextEpisode.number}',
+      );
+
+      unawaited(service.preloadStream(nextEpisode.url));
+    } catch (e) {
+      debugPrint('[PLAYER PRELOAD ERROR] $e');
+    }
   }
 
   // ============================================================
@@ -184,7 +294,9 @@ class _AnimePlayerMediaKitScreenState
   Future<void> _toggleFullscreenPlayback() async {
     final controller = _controller;
 
-    if (controller == null || !controller.value.isInitialized || _loading) {
+    if (controller == null ||
+        !controller.value.isInitialized ||
+        _loading) {
       return;
     }
 
@@ -211,16 +323,19 @@ class _AnimePlayerMediaKitScreenState
     if (controller == null) return;
 
     if (controller.value.hasError && _error == null) {
+      final technicalError =
+          controller.value.errorDescription ?? 'Unknown video error';
+
+      debugPrint('[PLAYER CONTROLLER ERROR] $technicalError');
+
       setState(() {
-        _error = controller.value.errorDescription ?? 'Không thể phát video.';
+        _error = _getReadableError(technicalError);
         _loading = false;
       });
 
       return;
     }
 
-    // Ghi nhận thời điểm video bắt đầu có tiến trình phát.
-    // Đây không phải thời điểm chính xác của frame đầu tiên được render.
     if (!_firstPositionLogged &&
         controller.value.isInitialized &&
         controller.value.position > Duration.zero) {
@@ -246,7 +361,6 @@ class _AnimePlayerMediaKitScreenState
     _firstPositionLogged = false;
 
     final episode = _episodes[index];
-    final service = ref.read(animeServiceProvider);
 
     final oldController = _controller;
 
@@ -269,83 +383,190 @@ class _AnimePlayerMediaKitScreenState
     try {
       debugPrint('========== ANIME PLAYER ==========');
       debugPrint('[PLAYER] Part: $_currentPartName');
+      debugPrint('[PLAYER] Anime URL: $_currentAnimeUrl');
       debugPrint('[PLAYER] Episode: ${episode.number}');
       debugPrint('[PLAYER] Episode URL: ${episode.url}');
+      debugPrint('[PLAYER] Offline mode: $_isOffline');
 
-      // Bắt đầu preload tập kế tiếp ngay khi bắt đầu tải tập hiện tại.
-      // Hai request chạy song song.
-      _preloadNextEpisode(index);
+      if (!_isOffline) {
+        unawaited(_preloadNextEpisode(index));
+      }
 
-      // Lấy URL HLS và giải phóng controller cũ đồng thời.
-      final streamWatch = Stopwatch()..start();
+      final offlineWatch = Stopwatch()..start();
 
-      final streamFuture = service
-          .getStream(episode.url)
-          .timeout(const Duration(seconds: 30));
-
-      final disposeFuture = oldController?.dispose() ??
-          Future<void>.value();
-
-      final results = await Future.wait<dynamic>([
-        disposeFuture,
-        streamFuture,
-      ]);
-
-      final stream = results[1] as AnimeStream;
+      final downloadedFile =
+      await _downloadService.getDownloadedEpisodeFile(
+        animeTitle: widget.animeTitle,
+        animeUrl: _currentAnimeUrl,
+        episode: episode,
+      );
 
       debugPrint(
-        '[PERF] getStream: ${streamWatch.elapsedMilliseconds}ms',
+        '[PERF] Check offline file: '
+            '${offlineWatch.elapsedMilliseconds}ms',
       );
 
       if (!mounted || requestId != _loadRequestId) return;
 
-      final streamUrl = stream.hlsUrl.trim();
-
-      debugPrint('[PLAYER] HLS URL: $streamUrl');
-      debugPrint('[PLAYER] Headers: ${stream.headers}');
-
-      if (streamUrl.isEmpty) {
-        throw Exception('Không tìm thấy URL video.');
+      if (oldController != null) {
+        await oldController.dispose();
       }
 
-      final headers = <String, String>{
-        'Referer': 'https://animehay17.site/',
-        'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-            'AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-        ...stream.headers,
-      };
+      if (!mounted || requestId != _loadRequestId) return;
 
-      newController = VideoPlayerController.networkUrl(
-        Uri.parse(streamUrl),
-        httpHeaders: headers,
-      );
+      if (downloadedFile != null) {
+        debugPrint(
+          '[PLAYER OFFLINE] Found: ${downloadedFile.path}',
+        );
 
-      _controller = newController;
+        try {
+          newController = VideoPlayerController.file(downloadedFile);
+          _controller = newController;
+          newController.addListener(_onPlayerUpdate);
 
-      newController.addListener(_onPlayerUpdate);
+          debugPrint('[PLAYER OFFLINE] Initializing local video...');
 
-      debugPrint('[PLAYER] Initializing video...');
+          final initializeWatch = Stopwatch()..start();
 
-      final initializeWatch = Stopwatch()..start();
+          await newController.initialize();
 
-      await newController.initialize();
+          debugPrint(
+            '[PERF] Offline initialize: '
+                '${initializeWatch.elapsedMilliseconds}ms',
+          );
 
-      debugPrint(
-        '[PERF] initialize: ${initializeWatch.elapsedMilliseconds}ms',
-      );
+          if (!mounted || requestId != _loadRequestId) {
+            newController.removeListener(_onPlayerUpdate);
+            await newController.dispose();
+            return;
+          }
 
-      if (!mounted || requestId != _loadRequestId) {
-        newController.removeListener(_onPlayerUpdate);
-        await newController.dispose();
-        return;
+          debugPrint('[PLAYER OFFLINE] Video initialized.');
+          debugPrint(
+            '[PLAYER OFFLINE] Duration: ${newController.value.duration}',
+          );
+          debugPrint(
+            '[PLAYER OFFLINE] Size: ${newController.value.size}',
+          );
+        } catch (e, stackTrace) {
+          debugPrint('[PLAYER OFFLINE ERROR] $e');
+          debugPrint('[PLAYER OFFLINE STACKTRACE] $stackTrace');
+
+          if (newController != null) {
+            newController.removeListener(_onPlayerUpdate);
+
+            if (_controller == newController) {
+              _controller = null;
+            }
+
+            await newController.dispose();
+            newController = null;
+          }
+
+          if (!mounted || requestId != _loadRequestId) return;
+
+          if (_isOffline) {
+            setState(() {
+              _loading = false;
+              _error = 'Không thể phát file video đã tải xuống.';
+            });
+
+            return;
+          }
+
+          debugPrint(
+            '[PLAYER] Local video could not be played. '
+                'Falling back to HLS.',
+          );
+        }
+      } else {
+        debugPrint('[PLAYER OFFLINE] No downloaded file found.');
+
+        if (_isOffline) {
+          setState(() {
+            _loading = false;
+            _error = 'Tập ${episode.number} chưa được tải xuống.';
+          });
+
+          return;
+        }
       }
 
-      debugPrint('[PLAYER] Video initialized.');
-      debugPrint('[PLAYER] Duration: ${newController.value.duration}');
-      debugPrint('[PLAYER] Size: ${newController.value.size}');
+      if (newController == null || !newController.value.isInitialized) {
+        if (_isOffline) {
+          setState(() {
+            _loading = false;
+            _error = 'Không tìm thấy file video đã tải xuống.';
+          });
 
-      await newController.setPlaybackSpeed(1.0);
+          return;
+        }
+
+        final service = ref.read(animeServiceProvider);
+
+        final streamWatch = Stopwatch()..start();
+
+        final streamFuture = service
+            .getStream(episode.url)
+            .timeout(const Duration(seconds: 30));
+
+        final stream = await streamFuture;
+
+        debugPrint(
+          '[PERF] getStream: ${streamWatch.elapsedMilliseconds}ms',
+        );
+
+        if (!mounted || requestId != _loadRequestId) return;
+
+        final streamUrl = stream.hlsUrl.trim();
+
+        debugPrint('[PLAYER] HLS URL: $streamUrl');
+        debugPrint('[PLAYER] Headers: ${stream.headers}');
+
+        if (streamUrl.isEmpty) {
+          throw Exception('Không tìm thấy URL video.');
+        }
+
+        final headers = <String, String>{
+          'Referer': 'https://animehay17.site/',
+          'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+              'AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+          ...stream.headers,
+        };
+
+        newController = VideoPlayerController.networkUrl(
+          Uri.parse(streamUrl),
+          httpHeaders: headers,
+        );
+
+        _controller = newController;
+        newController.addListener(_onPlayerUpdate);
+
+        debugPrint('[PLAYER] Initializing HLS video...');
+
+        final initializeWatch = Stopwatch()..start();
+
+        await newController.initialize();
+
+        debugPrint(
+          '[PERF] initialize: ${initializeWatch.elapsedMilliseconds}ms',
+        );
+
+        if (!mounted || requestId != _loadRequestId) {
+          newController.removeListener(_onPlayerUpdate);
+          await newController.dispose();
+          return;
+        }
+
+        debugPrint('[PLAYER] HLS video initialized.');
+        debugPrint('[PLAYER] Duration: ${newController.value.duration}');
+        debugPrint('[PLAYER] Size: ${newController.value.size}');
+      }
+
+      if (!mounted || requestId != _loadRequestId) return;
+
+      await newController!.setPlaybackSpeed(1.0);
 
       final playWatch = Stopwatch()..start();
 
@@ -366,9 +587,15 @@ class _AnimePlayerMediaKitScreenState
         _showFullscreenControls();
       }
 
-      debugPrint('[PLAYER] Playing.');
       debugPrint(
-        '[PERF] Total until play call: ${totalWatch.elapsedMilliseconds}ms',
+        _isOffline
+            ? '[PLAYER] Playing offline video.'
+            : '[PLAYER] Playing HLS video.',
+      );
+
+      debugPrint(
+        '[PERF] Total until play call: '
+            '${totalWatch.elapsedMilliseconds}ms',
       );
     } catch (e, stackTrace) {
       if (!mounted || requestId != _loadRequestId) {
@@ -396,7 +623,9 @@ class _AnimePlayerMediaKitScreenState
 
       setState(() {
         _loading = false;
-        _error = _getReadableError(e);
+        _error = _isOffline
+            ? 'Không thể phát tập phim đã tải xuống.'
+            : _getReadableError(e);
       });
 
       if (_isFullscreen) {
@@ -406,7 +635,16 @@ class _AnimePlayerMediaKitScreenState
   }
 
   Future<void> _onPartSelected(AnimePartDTO part) async {
-    if (part.name == _currentPartName || _loading) return;
+    if (_isOffline) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Không thể chuyển phần/mùa khi đang offline.'),
+        ),
+      );
+      return;
+    }
+
+    if (part.url == _currentAnimeUrl || _loading) return;
 
     final requestId = ++_partRequestId;
 
@@ -425,6 +663,7 @@ class _AnimePlayerMediaKitScreenState
       _error = null;
       _isSeeking = false;
       _seekValue = null;
+      _currentAnimeUrl = part.url;
     });
 
     try {
@@ -472,16 +711,6 @@ class _AnimePlayerMediaKitScreenState
     }
   }
 
-  String _getReadableError(Object error) {
-    final message = error.toString();
-
-    if (message.contains('TimeoutException')) {
-      return 'Kết nối đến nguồn phát quá thời gian. Vui lòng thử lại.';
-    }
-
-    return message;
-  }
-
   void _retry() {
     if (_episodes.isEmpty) return;
 
@@ -508,7 +737,9 @@ class _AnimePlayerMediaKitScreenState
     if (_isFullscreen) {
       _fullscreenControlsTimer?.cancel();
 
-      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      await SystemChrome.setEnabledSystemUIMode(
+        SystemUiMode.edgeToEdge,
+      );
 
       await SystemChrome.setPreferredOrientations([
         DeviceOrientation.portraitUp,
@@ -656,7 +887,8 @@ class _AnimePlayerMediaKitScreenState
           : Column(
         children: [
           _buildPlayerArea(),
-          if (widget.parts.isNotEmpty) _buildPartsChips(),
+          if (!_isOffline && widget.parts.isNotEmpty)
+            _buildPartsChips(),
           _buildEpisodeList(),
           const Spacer(),
         ],
@@ -888,9 +1120,8 @@ class _AnimePlayerMediaKitScreenState
                       color: isSelected
                           ? colorScheme.onPrimaryContainer
                           : colorScheme.onSurface,
-                      fontWeight: isSelected
-                          ? FontWeight.bold
-                          : FontWeight.normal,
+                      fontWeight:
+                      isSelected ? FontWeight.bold : FontWeight.normal,
                     ),
                   ),
                 );
@@ -910,11 +1141,13 @@ class _AnimePlayerMediaKitScreenState
     final colorScheme = Theme.of(context).colorScheme;
     final controller = _controller;
 
-    final initialized = controller != null && controller.value.isInitialized;
+    final initialized =
+        controller != null && controller.value.isInitialized;
 
-    final duration = initialized ? controller.value.duration : Duration.zero;
-
-    final position = initialized ? controller.value.position : Duration.zero;
+    final duration =
+    initialized ? controller.value.duration : Duration.zero;
+    final position =
+    initialized ? controller.value.position : Duration.zero;
 
     final maxMilliseconds = duration.inMilliseconds > 0
         ? duration.inMilliseconds.toDouble()
@@ -922,7 +1155,9 @@ class _AnimePlayerMediaKitScreenState
 
     final currentMilliseconds = _isSeeking
         ? (_seekValue ?? 0).clamp(0.0, maxMilliseconds)
-        : position.inMilliseconds.toDouble().clamp(0.0, maxMilliseconds);
+        : position.inMilliseconds
+        .toDouble()
+        .clamp(0.0, maxMilliseconds);
 
     final enabled = initialized && !_loading;
 
@@ -953,7 +1188,8 @@ class _AnimePlayerMediaKitScreenState
               max: maxMilliseconds,
               value: currentMilliseconds,
               activeColor: colorScheme.primary,
-              inactiveColor: colorScheme.onSurface.withValues(alpha: 0.24),
+              inactiveColor:
+              colorScheme.onSurface.withValues(alpha: 0.24),
               onChanged: enabled && duration.inMilliseconds > 0
                   ? (value) {
                 setState(() {
@@ -1229,10 +1465,10 @@ class _AnimePlayerMediaKitScreenState
               _error ?? 'Không thể phát video.',
               style: TextStyle(
                 color: colorScheme.onSurfaceVariant,
-                fontSize: 12,
+                fontSize: 13,
               ),
               textAlign: TextAlign.center,
-              maxLines: 5,
+              maxLines: 3,
               overflow: TextOverflow.ellipsis,
             ),
             const SizedBox(height: 16),

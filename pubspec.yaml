@@ -38,6 +38,7 @@ dependencies:
   markdown: ^7.3.1
   video_player: ^2.11.1
   chewie: ^1.8.3
+  ffmpeg_kit_flutter_new_min: ^4.0.0
 
 dev_dependencies:
   flutter_test:

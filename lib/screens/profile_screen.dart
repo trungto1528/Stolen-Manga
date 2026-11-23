@@ -1,10 +1,13 @@
+
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:novel_app/screens/user_management.dart';
+
 import '../config/api_config.dart';
 import '../models/User.dart';
 import '../models/app_theme_mode.dart';
@@ -19,64 +22,84 @@ import '/offline/screen/downloaded_stories_screen.dart';
 import 'login_screen.dart';
 import 'my_stories.dart';
 import 'story_chapter_create.dart';
+
 class ProfilePage extends StatefulWidget {
   final AppThemeMode currentMode;
   final Function(AppThemeMode) onThemeChanged;
+
   const ProfilePage({
     super.key,
     required this.currentMode,
     required this.onThemeChanged,
   });
+
   @override
   State<ProfilePage> createState() => _ProfilePageState();
 }
+
 class _ProfilePageState extends State<ProfilePage> {
   User? user;
   bool _hasUpdate = false;
+
   @override
   void initState() {
     super.initState();
     OfflineModeService.isOffline.addListener(_onOfflineModeChanged);
-    // Không gọi API khi đang offline.
+
     if (!OfflineModeService.isOffline.value) {
       _loadUser();
       _checkOta();
     }
   }
+
   @override
   void dispose() {
     OfflineModeService.isOffline.removeListener(_onOfflineModeChanged);
     super.dispose();
   }
+
   void _onOfflineModeChanged() {
     if (!mounted) return;
+
     setState(() {});
+
     if (!OfflineModeService.isOffline.value) {
       _loadUser();
     }
   }
+
   bool get isOffline => OfflineModeService.isOffline.value;
+
   bool get isAdmin => user?.role.toUpperCase() == 'ADMIN';
+
   Future<void> _loadUser() async {
     if (isOffline) return;
+
     try {
       final prefs = await AppPreferences.getInstance();
       final userStr = prefs.getString('user');
+
       if (userStr == null) {
         if (!mounted) return;
         setState(() => user = null);
         return;
       }
+
       final savedUser = User.fromJson(jsonDecode(userStr));
-      // Dừng trước khi gọi API nếu ứng dụng vừa chuyển sang offline.
+
       if (isOffline) return;
+
       final response = await Auth().fetchUser(savedUser.id);
+
       if (isOffline || !mounted) return;
+
       final Map<String, dynamic> userJson = jsonDecode(response);
       final fetchedUser = User.fromJson(userJson);
+
       setState(() {
         user = fetchedUser;
       });
+
       await prefs.setString('user', jsonEncode(userJson));
     } catch (e) {
       debugPrint('Lỗi tải thông tin user: $e');
@@ -85,10 +108,16 @@ class _ProfilePageState extends State<ProfilePage> {
 
   Future<void> _checkOta() async {
     if (isOffline) return;
+
     try {
-      final remote = await OtaService().checkUpdate().timeout(const Duration(seconds: 20));
+      final remote = await OtaService()
+          .checkUpdate()
+          .timeout(const Duration(seconds: 20));
+
       if (!mounted) return;
+
       final changelogs = remote?['changelogs'] as List?;
+
       setState(() {
         _hasUpdate = (changelogs ?? []).isNotEmpty;
       });
@@ -96,6 +125,7 @@ class _ProfilePageState extends State<ProfilePage> {
       debugPrint('Lỗi kiểm tra OTA: $e');
     }
   }
+
   Color _getRoleColor(String role) {
     switch (role.toUpperCase()) {
       case 'ADMIN':
@@ -104,24 +134,31 @@ class _ProfilePageState extends State<ProfilePage> {
         return Colors.blueGrey;
     }
   }
+
   Future<void> logout() async {
     final prefs = await AppPreferences.getInstance();
     await prefs.remove('user');
+
     if (!mounted) return;
+
     setState(() {
       user = null;
     });
   }
+
   Future<void> _goLogin() async {
     if (isOffline) return;
+
     final result = await Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => const LoginScreen()),
     );
+
     if (result == true && mounted && !isOffline) {
       await _loadUser();
     }
   }
+
   void _openDownloadedStories() {
     Navigator.push(
       context,
@@ -130,8 +167,10 @@ class _ProfilePageState extends State<ProfilePage> {
       ),
     );
   }
+
   void _openSettings() {
     if (isOffline) return;
+
     showModalBottomSheet(
       context: context,
       builder: (sheetContext) {
@@ -180,7 +219,9 @@ class _ProfilePageState extends State<ProfilePage> {
                 onTap: () {
                   final currentUser = user;
                   Navigator.pop(sheetContext);
+
                   if (currentUser == null || isOffline) return;
+
                   Navigator.push(
                     context,
                     MaterialPageRoute(
@@ -196,6 +237,7 @@ class _ProfilePageState extends State<ProfilePage> {
                 title: const Text('Kiểm tra cập nhật'),
                 onTap: () {
                   Navigator.pop(sheetContext);
+
                   if (!isOffline) {
                     OtaService().checkAndUpdate(context);
                   }
@@ -207,37 +249,54 @@ class _ProfilePageState extends State<ProfilePage> {
       },
     );
   }
+
   Future<void> _changeAvatar() async {
     if (isOffline) return;
+
     final currentUser = user;
     if (currentUser == null) return;
+
     final picker = ImagePicker();
     final picked = await picker.pickImage(source: ImageSource.gallery);
+
     if (picked == null || !mounted || isOffline) return;
+
     final file = File(picked.path);
+
     try {
       final request = http.MultipartRequest(
         'POST',
         Uri.parse('${ApiConfig.api}/users/upload-avatar'),
       );
+
       request.files.add(
         await http.MultipartFile.fromPath('file', file.path),
       );
+
       request.fields['username'] = currentUser.username;
+
       if (isOffline) return;
+
       final response = await request.send();
+
       if (response.statusCode == 200) {
         final fileName = await response.stream.bytesToString();
+
         currentUser.avatarUrl = '/$fileName';
+
         final prefs = await AppPreferences.getInstance();
+
         await prefs.setString(
           'user',
           jsonEncode(currentUser.toJson()),
         );
+
         if (!mounted) return;
+
         setState(() {
           user = currentUser;
         });
+
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Cập nhật avatar thành công'),
@@ -248,18 +307,23 @@ class _ProfilePageState extends State<ProfilePage> {
       }
     } catch (e) {
       if (!mounted) return;
+
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Lỗi upload avatar')),
       );
     }
   }
+
   Future<void> _changeName() async {
     if (isOffline) return;
+
     final currentUser = user;
     if (currentUser == null) return;
+
     final controller = TextEditingController(
       text: currentUser.displayName,
     );
+
     final newName = await showDialog<String>(
       context: context,
       builder: (_) => AlertDialog(
@@ -284,12 +348,16 @@ class _ProfilePageState extends State<ProfilePage> {
         ],
       ),
     );
+
     final name = newName?.trim();
+
     if (name == null || name.isEmpty || !mounted || isOffline) {
       controller.dispose();
       return;
     }
+
     controller.dispose();
+
     try {
       final res = await http.post(
         Uri.parse(
@@ -298,17 +366,23 @@ class _ProfilePageState extends State<ProfilePage> {
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'displayName': name}),
       );
+
       if (res.statusCode == 200) {
         currentUser.displayName = name;
+
         final prefs = await AppPreferences.getInstance();
+
         await prefs.setString(
           'user',
           jsonEncode(currentUser.toJson()),
         );
+
         if (!mounted) return;
+
         setState(() {
           user = currentUser;
         });
+
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Đổi tên thành công')),
         );
@@ -317,11 +391,13 @@ class _ProfilePageState extends State<ProfilePage> {
       }
     } catch (e) {
       if (!mounted) return;
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Lỗi: $e')),
       );
     }
   }
+
   Widget _tile(
       IconData icon,
       String title,
@@ -340,8 +416,10 @@ class _ProfilePageState extends State<ProfilePage> {
       onTap: onTap,
     );
   }
+
   Widget _buildHeader() {
     final currentUser = user!;
+
     return Row(
       children: [
         GestureDetector(
@@ -439,18 +517,20 @@ class _ProfilePageState extends State<ProfilePage> {
       ],
     );
   }
+
   Widget _buildOfflineBody() {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
         _tile(
           Icons.download_done,
-          'Quản lý truyện đã tải',
+          'Quản lý tải xuống',
           _openDownloadedStories,
         ),
       ],
     );
   }
+
   Widget _buildOnlineBody() {
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -527,11 +607,12 @@ class _ProfilePageState extends State<ProfilePage> {
       ],
     );
   }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(isOffline ? 'Truyện offline' : 'Tài khoản'),
+        title: Text(isOffline ? 'Quản lý tải xuống' : 'Tài khoản'),
         actions: [
           if (!isOffline)
             Stack(

@@ -1,6 +1,5 @@
 # Changelog
 
-## Home
-- Úp bô
 ## Anime
-- Stole từ animehay.
+- Sửa lại tí giao diện.
+- Thêm download offline (chưa test real).

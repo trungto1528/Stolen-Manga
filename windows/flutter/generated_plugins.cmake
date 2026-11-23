@@ -3,6 +3,7 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  ffmpeg_kit_flutter_new_min
   file_selector_windows
   permission_handler_windows
   url_launcher_windows
