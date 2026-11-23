@@ -87,9 +87,7 @@ class _AnimePlayerMediaKitScreenState
     }
 
     if (_isFullscreen) {
-      SystemChrome.setEnabledSystemUIMode(
-        SystemUiMode.edgeToEdge,
-      );
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
 
       SystemChrome.setPreferredOrientations([
         DeviceOrientation.portraitUp,
@@ -108,8 +106,7 @@ class _AnimePlayerMediaKitScreenState
 
     if (controller.value.hasError && _error == null) {
       setState(() {
-        _error = controller.value.errorDescription ??
-            'Không thể phát video.';
+        _error = controller.value.errorDescription ?? 'Không thể phát video.';
         _loading = false;
       });
 
@@ -216,8 +213,7 @@ class _AnimePlayerMediaKitScreenState
       debugPrint('[PLAYER] Playing.');
     } catch (e, stackTrace) {
       if (!mounted || requestId != _loadRequestId) {
-        if (newController != null &&
-            newController != _controller) {
+        if (newController != null && newController != _controller) {
           newController.removeListener(_onPlayerUpdate);
           await newController.dispose();
         }
@@ -399,10 +395,9 @@ class _AnimePlayerMediaKitScreenState
           ? _buildFullscreenPlayer()
           : Column(
         children: [
-          Expanded(
-            child: _buildPlayerArea(),
-          ),
+          _buildPlayerArea(),
           _buildEpisodeList(),
+          const Spacer(),
         ],
       ),
     );
@@ -449,23 +444,34 @@ class _AnimePlayerMediaKitScreenState
   }
 
   Widget _buildPlayerArea() {
-    return Container(
-      width: double.infinity,
-      color: Colors.black,
-      child: Column(
-        children: [
-          Expanded(
-            child: Center(
-              child: _buildVideo(),
-            ),
+    final controller = _controller;
+
+    final aspectRatio = controller != null &&
+        controller.value.isInitialized &&
+        controller.value.aspectRatio > 0
+        ? controller.value.aspectRatio
+        : 16 / 9;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Align(
+          alignment: Alignment.topCenter,
+          child: AspectRatio(
+            aspectRatio: aspectRatio,
+            child: _buildVideoContent(),
           ),
-          _buildControlsBar(),
-        ],
-      ),
+        ),
+        _buildControlsBar(),
+      ],
     );
   }
 
   Widget _buildVideo() {
+    return _buildVideoContent();
+  }
+
+  Widget _buildVideoContent() {
     final controller = _controller;
 
     if (_error != null && !_loading) {
@@ -498,44 +504,35 @@ class _AnimePlayerMediaKitScreenState
       );
     }
 
-    final aspectRatio = controller.value.aspectRatio > 0
-        ? controller.value.aspectRatio
-        : 16 / 9;
-
-    return AspectRatio(
-      aspectRatio: aspectRatio,
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          VideoPlayer(controller),
-
-          if (controller.value.isBuffering)
-            Container(
-              color: Colors.black38,
-              alignment: Alignment.center,
-              child: const CircularProgressIndicator(
-                color: Colors.white,
-              ),
+    return Stack(
+      fit: StackFit.expand,
+      alignment: Alignment.center,
+      children: [
+        VideoPlayer(controller),
+        if (controller.value.isBuffering)
+          Container(
+            color: Colors.black38,
+            alignment: Alignment.center,
+            child: const CircularProgressIndicator(
+              color: Colors.white,
             ),
-
-          if (_loading)
-            Container(
-              color: Colors.black54,
-              alignment: Alignment.center,
-              child: const CircularProgressIndicator(
-                color: Colors.white,
-              ),
+          ),
+        if (_loading)
+          Container(
+            color: Colors.black54,
+            alignment: Alignment.center,
+            child: const CircularProgressIndicator(
+              color: Colors.white,
             ),
-        ],
-      ),
+          ),
+      ],
     );
   }
 
   Widget _buildControlsBar() {
     final controller = _controller;
 
-    final initialized =
-        controller != null && controller.value.isInitialized;
+    final initialized = controller != null && controller.value.isInitialized;
 
     final duration = initialized
         ? controller.value.duration
@@ -561,11 +558,10 @@ class _AnimePlayerMediaKitScreenState
     return Container(
       width: double.infinity,
       color: Colors.black,
-      padding: const EdgeInsets.fromLTRB(12, 2, 12, 8),
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 2),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Seek bar.
           SliderTheme(
             data: SliderTheme.of(context).copyWith(
               trackHeight: 3,
@@ -602,8 +598,6 @@ class _AnimePlayerMediaKitScreenState
                   : null,
             ),
           ),
-
-          // Playback controls.
           Row(
             children: [
               _buildControlButton(
@@ -612,37 +606,29 @@ class _AnimePlayerMediaKitScreenState
                 enabled: enabled && _currentEpisodeIndex > 0,
                 onPressed: _previousEpisode,
               ),
-
               _buildControlButton(
                 icon: Icons.replay_10,
                 tooltip: 'Lùi 10 giây',
                 enabled: enabled,
                 onPressed: () => _seekRelative(-10),
               ),
-
               _buildPlayPauseButton(
                 controller: controller,
                 enabled: enabled,
               ),
-
               _buildControlButton(
                 icon: Icons.forward_10,
                 tooltip: 'Tiến 10 giây',
                 enabled: enabled,
                 onPressed: () => _seekRelative(10),
               ),
-
               _buildControlButton(
                 icon: Icons.skip_next,
                 tooltip: 'Tập tiếp theo',
-                enabled: enabled &&
-                    _currentEpisodeIndex < _episodes.length - 1,
+                enabled: enabled && _currentEpisodeIndex < _episodes.length - 1,
                 onPressed: _nextEpisode,
               ),
-
-              const SizedBox(width: 8),
-
-              // Current position / duration.
+              const SizedBox(width: 6),
               Expanded(
                 child: FittedBox(
                   fit: BoxFit.scaleDown,
@@ -685,8 +671,6 @@ class _AnimePlayerMediaKitScreenState
                   ),
                 ),
               ),
-
-              // Playback speed.
               PopupMenuButton<double>(
                 enabled: enabled,
                 tooltip: 'Tốc độ phát',
@@ -738,8 +722,6 @@ class _AnimePlayerMediaKitScreenState
                   ),
                 ),
               ),
-
-              // Fullscreen.
               IconButton(
                 visualDensity: VisualDensity.compact,
                 padding: EdgeInsets.zero,
@@ -876,14 +858,14 @@ class _AnimePlayerMediaKitScreenState
     final currentEpisode = _episodes[_currentEpisodeIndex];
 
     return SizedBox(
-      height: 200,
+      height: 100,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
             padding: const EdgeInsets.symmetric(
-              horizontal: 16,
-              vertical: 8,
+              horizontal: 12,
+              vertical: 2,
             ),
             child: Row(
               children: [
@@ -892,23 +874,34 @@ class _AnimePlayerMediaKitScreenState
                     'Tập ${currentEpisode.number}: ${currentEpisode.title}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                       fontWeight: FontWeight.bold,
                     ),
                   ),
                 ),
                 IconButton(
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(
+                    minWidth: 32,
+                    minHeight: 32,
+                  ),
                   tooltip: 'Tập trước',
-                  icon: const Icon(Icons.skip_previous),
+                  icon: const Icon(Icons.skip_previous, size: 20),
                   onPressed: _currentEpisodeIndex > 0 && !_loading
                       ? _previousEpisode
                       : null,
                 ),
                 IconButton(
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(
+                    minWidth: 32,
+                    minHeight: 32,
+                  ),
                   tooltip: 'Tập tiếp theo',
-                  icon: const Icon(Icons.skip_next),
-                  onPressed:
-                  _currentEpisodeIndex < _episodes.length - 1 &&
+                  icon: const Icon(Icons.skip_next, size: 20),
+                  onPressed: _currentEpisodeIndex < _episodes.length - 1 &&
                       !_loading
                       ? _nextEpisode
                       : null,
@@ -919,29 +912,33 @@ class _AnimePlayerMediaKitScreenState
           Expanded(
             child: ListView.builder(
               scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 16),
+              padding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 2,
+              ),
               itemCount: _episodes.length,
               itemBuilder: (context, index) {
                 final episode = _episodes[index];
                 final isCurrent = index == _currentEpisodeIndex;
 
                 return Padding(
-                  padding: const EdgeInsets.only(right: 12),
+                  padding: const EdgeInsets.only(right: 6),
                   child: Material(
                     color: isCurrent
                         ? Theme.of(context).colorScheme.primaryContainer
                         : Theme.of(context).colorScheme.surfaceContainerHighest,
-                    borderRadius: BorderRadius.circular(8),
+                    borderRadius: BorderRadius.circular(6),
                     child: InkWell(
-                      borderRadius: BorderRadius.circular(8),
-                      onTap: _loading
-                          ? null
-                          : () => _loadEpisode(index),
+                      borderRadius: BorderRadius.circular(6),
+                      onTap: _loading ? null : () => _loadEpisode(index),
                       child: Container(
-                        width: 120,
-                        padding: const EdgeInsets.all(8),
+                        width: 76,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 5,
+                          vertical: 4,
+                        ),
                         decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(8),
+                          borderRadius: BorderRadius.circular(6),
                           border: Border.all(
                             color: isCurrent
                                 ? Theme.of(context).colorScheme.primary
@@ -953,7 +950,10 @@ class _AnimePlayerMediaKitScreenState
                           children: [
                             Text(
                               'Tập ${episode.number}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                               style: TextStyle(
+                                fontSize: 12,
                                 fontWeight: FontWeight.bold,
                                 color: isCurrent
                                     ? Theme.of(context)
@@ -962,14 +962,15 @@ class _AnimePlayerMediaKitScreenState
                                     : Theme.of(context).colorScheme.onSurface,
                               ),
                             ),
-                            const SizedBox(height: 4),
+                            const SizedBox(height: 2),
                             Text(
                               episode.title,
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
                               textAlign: TextAlign.center,
                               style: TextStyle(
-                                fontSize: 11,
+                                fontSize: 9,
+                                height: 1.1,
                                 color: isCurrent
                                     ? Theme.of(context)
                                     .colorScheme
