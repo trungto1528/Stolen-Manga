@@ -202,7 +202,7 @@ class _HomePageState extends State<HomePage> with RouteAware {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(isOffline ? 'Truyện offline' : 'Cạk Cạk Cạk'),
+        title: Text(isOffline ? 'Truyện offline' : 'Stolen'),
         actions: [
           _buildOfflineModeButton(),
           if (!isOffline)

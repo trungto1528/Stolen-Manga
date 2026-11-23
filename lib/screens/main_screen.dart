@@ -4,6 +4,7 @@ import 'home_screen.dart';
 import 'library_screen.dart';
 import 'profile_screen.dart';
 import 'ai_chat_screen.dart';
+import 'package:novel_app/anime/screens/anime_home_screen.dart';
 import '../models/app_theme_mode.dart';
 class MainScreen extends StatefulWidget {
   final AppThemeMode currentMode;
@@ -27,6 +28,7 @@ class _MainScreenState extends State<MainScreen> {
   Widget build(BuildContext context) {
     final pages = [
       const HomePage(),
+      const AnimeHomeScreen(),
       const LibraryPage(),
       ProfilePage(
         currentMode: widget.currentMode,
@@ -48,6 +50,11 @@ class _MainScreenState extends State<MainScreen> {
             icon: Icon(Icons.home_outlined),
             selectedIcon: Icon(Icons.home),
             label: 'Home',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.animation_outlined),
+            selectedIcon: Icon(Icons.animation),
+            label: 'Anime',
           ),
           NavigationDestination(
             icon: Icon(Icons.book_outlined),

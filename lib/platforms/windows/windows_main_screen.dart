@@ -93,7 +93,7 @@ class _WindowsMainScreenState extends State<WindowsMainScreen> {
                         const SizedBox(width: 12),
                         Expanded(
                           child: Text(
-                            'Cạk Cạk Cạk',
+                            'Stolen',
                             style: theme.textTheme.titleLarge?.copyWith(
                               fontWeight: FontWeight.bold,
                             ),
