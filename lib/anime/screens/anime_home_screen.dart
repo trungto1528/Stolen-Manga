@@ -125,10 +125,6 @@ class _AnimeHomeScreenState extends ConsumerState<AnimeHomeScreen> {
             fontWeight: FontWeight.bold,
           ),
         ),
-        TextButton(
-          onPressed: onSeeAll,
-          child: const Text('Xem tất cả'),
-        ),
       ],
     );
   }

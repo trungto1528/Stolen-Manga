@@ -128,8 +128,6 @@ class _AnimeSearchScreenState extends ConsumerState<AnimeSearchScreen> {
       ),
       body: Column(
         children: [
-          if (_filterMetadata != null)
-            _buildFilterBar(),
           Expanded(
             child: _buildResults(),
           ),

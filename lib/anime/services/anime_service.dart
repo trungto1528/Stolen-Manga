@@ -1,5 +1,6 @@
-import 'dart:convert';
 
+import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../../config/api_config.dart';
@@ -9,10 +10,16 @@ import '../../models/anime_part_dto.dart';
 class AnimeService {
   String get _baseUrl => ApiConfig.animeUrl;
 
+  static const Duration _streamCacheTtl = Duration(seconds: 60);
+  static const int _maxStreamCacheEntries = 20;
+
+  final Map<String, _CachedAnimeStream> _streamCache = {};
+  final Map<String, Future<AnimeStream>> _streamRequests = {};
+
   Map<String, dynamic> _decodeMap(
-    String body, {
-    String errorMessage = 'Dữ liệu trả về không hợp lệ',
-  }) {
+      String body, {
+        String errorMessage = 'Dữ liệu trả về không hợp lệ',
+      }) {
     final decoded = jsonDecode(body);
 
     if (decoded is Map) {
@@ -23,9 +30,9 @@ class AnimeService {
   }
 
   List<dynamic> _decodeList(
-    String body, {
-    String errorMessage = 'Dữ liệu trả về không hợp lệ',
-  }) {
+      String body, {
+        String errorMessage = 'Dữ liệu trả về không hợp lệ',
+      }) {
     final decoded = jsonDecode(body);
 
     if (decoded is List) {
@@ -188,19 +195,113 @@ class AnimeService {
   // ============================================================
 
   Future<AnimeStream> getStream(String episodeUrl) async {
+    final key = episodeUrl.trim();
+
+    if (key.isEmpty) {
+      throw ArgumentError('Episode URL không được để trống.');
+    }
+
+    final cached = _streamCache[key];
+
+    if (cached != null) {
+      if (DateTime.now().isBefore(cached.expiresAt)) {
+        debugPrint('[STREAM CACHE] HIT: $key');
+        return cached.stream;
+      }
+
+      _streamCache.remove(key);
+      debugPrint('[STREAM CACHE] EXPIRED: $key');
+    }
+
+    final pendingRequest = _streamRequests[key];
+
+    if (pendingRequest != null) {
+      debugPrint('[STREAM CACHE] JOIN REQUEST: $key');
+      return pendingRequest;
+    }
+
+    final request = _fetchStream(key);
+    _streamRequests[key] = request;
+
+    try {
+      final stream = await request;
+
+      if (stream.hlsUrl.trim().isNotEmpty) {
+        _streamCache[key] = _CachedAnimeStream(
+          stream: stream,
+          expiresAt: DateTime.now().add(_streamCacheTtl),
+        );
+
+        _trimStreamCache();
+      }
+
+      return stream;
+    } finally {
+      if (identical(_streamRequests[key], request)) {
+        _streamRequests.remove(key);
+      }
+    }
+  }
+
+  Future<AnimeStream> _fetchStream(String episodeUrl) async {
+    final stopwatch = Stopwatch()..start();
+
     final uri = Uri.parse('$_baseUrl/stream').replace(
       queryParameters: {'episodeUrl': episodeUrl},
     );
 
-    final res = await http.get(uri);
+    try {
+      final res = await http.get(uri);
 
-    if (res.statusCode == 200) {
-      return AnimeStream.fromJson(
-        _decodeMap(res.body, errorMessage: 'Dữ liệu nguồn phát không hợp lệ'),
+      if (res.statusCode == 200) {
+        final stream = AnimeStream.fromJson(
+          _decodeMap(res.body, errorMessage: 'Dữ liệu nguồn phát không hợp lệ'),
+        );
+
+        debugPrint(
+          '[STREAM API] ${stopwatch.elapsedMilliseconds}ms: $episodeUrl',
+        );
+
+        return stream;
+      }
+
+      throw _httpError('Lấy nguồn phát thất bại', res);
+    } catch (e) {
+      debugPrint(
+        '[STREAM API ERROR] ${stopwatch.elapsedMilliseconds}ms: $e',
       );
+      rethrow;
     }
+  }
 
-    throw _httpError('Lấy nguồn phát thất bại', res);
+  /// Phân giải trước link phát của một tập.
+  ///
+  /// Lỗi preload không ảnh hưởng đến tập hiện tại.
+  Future<void> preloadStream(String episodeUrl) async {
+    try {
+      debugPrint('[STREAM PRELOAD] START: $episodeUrl');
+
+      await getStream(episodeUrl);
+
+      debugPrint('[STREAM PRELOAD] COMPLETED: $episodeUrl');
+    } catch (e) {
+      debugPrint('[STREAM PRELOAD] FAILED: $episodeUrl - $e');
+    }
+  }
+
+  void _trimStreamCache() {
+    while (_streamCache.length > _maxStreamCacheEntries) {
+      _streamCache.remove(_streamCache.keys.first);
+    }
+  }
+
+  /// Xóa cache link phát nếu cần làm mới nguồn.
+  void clearStreamCache([String? episodeUrl]) {
+    if (episodeUrl == null) {
+      _streamCache.clear();
+    } else {
+      _streamCache.remove(episodeUrl.trim());
+    }
   }
 
   // ============================================================
@@ -291,4 +392,14 @@ class AnimeService {
 
     throw _httpError('Lấy danh sách phần thất bại', res);
   }
+}
+
+class _CachedAnimeStream {
+  final AnimeStream stream;
+  final DateTime expiresAt;
+
+  const _CachedAnimeStream({
+    required this.stream,
+    required this.expiresAt,
+  });
 }

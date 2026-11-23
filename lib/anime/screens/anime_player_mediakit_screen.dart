@@ -1,16 +1,15 @@
 
 import 'dart:async';
-import 'dart:ui' show FontFeature;
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:video_player/video_player.dart';
 
-import '../models/anime.dart';
 import '../../models/anime_part_dto.dart';
+import '../models/anime.dart';
 import '../providers/anime_providers.dart';
-import 'anime_detail_screen.dart';
 
 class AnimePlayerMediaKitScreen extends ConsumerStatefulWidget {
   final String animeTitle;
@@ -38,19 +37,31 @@ class _AnimePlayerMediaKitScreenState
     extends ConsumerState<AnimePlayerMediaKitScreen> {
   VideoPlayerController? _controller;
 
-  late final List<AnimeEpisode> _episodes;
+  late List<AnimeEpisode> _episodes;
   late int _currentEpisodeIndex;
+
+  String? _currentPartName;
 
   bool _loading = false;
   bool _isFullscreen = false;
   bool _isSeeking = false;
 
+  bool _fullscreenControlsVisible = true;
+  Timer? _fullscreenControlsTimer;
+
   String? _error;
 
   int _loadRequestId = 0;
+  int _partRequestId = 0;
 
   double? _seekValue;
   double _playbackRate = 1.0;
+
+  Stopwatch? _episodeStopwatch;
+  bool _firstPositionLogged = false;
+
+  static const Duration _controlsHideDelay = Duration(seconds: 2);
+  static const int _skipIntroSeconds = 90;
 
   static const List<double> _playbackRates = [
     0.5,
@@ -66,7 +77,8 @@ class _AnimePlayerMediaKitScreenState
   void initState() {
     super.initState();
 
-    _episodes = List.unmodifiable(widget.episodes);
+    _episodes = List.of(widget.episodes);
+    _currentPartName = widget.currentPartName;
 
     if (_episodes.isEmpty) {
       _currentEpisodeIndex = 0;
@@ -85,6 +97,9 @@ class _AnimePlayerMediaKitScreenState
   @override
   void dispose() {
     _loadRequestId++;
+    _partRequestId++;
+
+    _fullscreenControlsTimer?.cancel();
 
     final controller = _controller;
     _controller = null;
@@ -95,9 +110,7 @@ class _AnimePlayerMediaKitScreenState
     }
 
     if (_isFullscreen) {
-      SystemChrome.setEnabledSystemUIMode(
-        SystemUiMode.edgeToEdge,
-      );
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
 
       SystemChrome.setPreferredOrientations([
         DeviceOrientation.portraitUp,
@@ -106,6 +119,89 @@ class _AnimePlayerMediaKitScreenState
 
     super.dispose();
   }
+
+  // ============================================================
+  // STREAM PRELOAD
+  // ============================================================
+
+  void _preloadNextEpisode(int currentIndex) {
+    final nextIndex = currentIndex + 1;
+
+    if (nextIndex >= _episodes.length) {
+      return;
+    }
+
+    final nextEpisode = _episodes[nextIndex];
+    final service = ref.read(animeServiceProvider);
+
+    debugPrint(
+      '[PLAYER PRELOAD] Start: Episode ${nextEpisode.number}',
+    );
+
+    // Chỉ phân giải URL HLS, không khởi tạo thêm VideoPlayerController.
+    // AnimeService sẽ lưu kết quả vào cache để lần chuyển tập dùng lại.
+    unawaited(service.preloadStream(nextEpisode.url));
+  }
+
+  // ============================================================
+  // FULLSCREEN CONTROLS
+  // ============================================================
+
+  void _showFullscreenControls() {
+    if (!mounted || !_isFullscreen) return;
+
+    setState(() {
+      _fullscreenControlsVisible = true;
+    });
+
+    _scheduleFullscreenControlsHide();
+  }
+
+  void _scheduleFullscreenControlsHide() {
+    _fullscreenControlsTimer?.cancel();
+
+    if (!mounted || !_isFullscreen) return;
+
+    _fullscreenControlsTimer = Timer(_controlsHideDelay, () {
+      if (!mounted || !_isFullscreen) return;
+
+      setState(() {
+        _fullscreenControlsVisible = false;
+      });
+    });
+  }
+
+  void _hideFullscreenControls() {
+    _fullscreenControlsTimer?.cancel();
+
+    if (!mounted) return;
+
+    setState(() {
+      _fullscreenControlsVisible = false;
+    });
+  }
+
+  Future<void> _toggleFullscreenPlayback() async {
+    final controller = _controller;
+
+    if (controller == null || !controller.value.isInitialized || _loading) {
+      return;
+    }
+
+    if (controller.value.isPlaying) {
+      await controller.pause();
+    } else {
+      await controller.play();
+    }
+
+    if (!mounted) return;
+
+    _showFullscreenControls();
+  }
+
+  // ============================================================
+  // PLAYER
+  // ============================================================
 
   void _onPlayerUpdate() {
     if (!mounted) return;
@@ -116,12 +212,25 @@ class _AnimePlayerMediaKitScreenState
 
     if (controller.value.hasError && _error == null) {
       setState(() {
-        _error =
-            controller.value.errorDescription ?? 'Không thể phát video.';
+        _error = controller.value.errorDescription ?? 'Không thể phát video.';
         _loading = false;
       });
 
       return;
+    }
+
+    // Ghi nhận thời điểm video bắt đầu có tiến trình phát.
+    // Đây không phải thời điểm chính xác của frame đầu tiên được render.
+    if (!_firstPositionLogged &&
+        controller.value.isInitialized &&
+        controller.value.position > Duration.zero) {
+      _firstPositionLogged = true;
+
+      final elapsed = _episodeStopwatch?.elapsedMilliseconds;
+
+      debugPrint(
+        '[PERF] First playback position: ${elapsed ?? -1}ms',
+      );
     }
 
     setState(() {});
@@ -131,6 +240,13 @@ class _AnimePlayerMediaKitScreenState
     if (index < 0 || index >= _episodes.length) return;
 
     final requestId = ++_loadRequestId;
+    final totalWatch = Stopwatch()..start();
+
+    _episodeStopwatch = totalWatch;
+    _firstPositionLogged = false;
+
+    final episode = _episodes[index];
+    final service = ref.read(animeServiceProvider);
 
     final oldController = _controller;
 
@@ -148,25 +264,38 @@ class _AnimePlayerMediaKitScreenState
       _controller = null;
     });
 
-    if (oldController != null) {
-      await oldController.dispose();
-    }
-
-    if (!mounted || requestId != _loadRequestId) return;
-
     VideoPlayerController? newController;
 
     try {
-      final episode = _episodes[index];
-
       debugPrint('========== ANIME PLAYER ==========');
+      debugPrint('[PLAYER] Part: $_currentPartName');
       debugPrint('[PLAYER] Episode: ${episode.number}');
       debugPrint('[PLAYER] Episode URL: ${episode.url}');
 
-      final stream = await ref
-          .read(animeServiceProvider)
+      // Bắt đầu preload tập kế tiếp ngay khi bắt đầu tải tập hiện tại.
+      // Hai request chạy song song.
+      _preloadNextEpisode(index);
+
+      // Lấy URL HLS và giải phóng controller cũ đồng thời.
+      final streamWatch = Stopwatch()..start();
+
+      final streamFuture = service
           .getStream(episode.url)
           .timeout(const Duration(seconds: 30));
+
+      final disposeFuture = oldController?.dispose() ??
+          Future<void>.value();
+
+      final results = await Future.wait<dynamic>([
+        disposeFuture,
+        streamFuture,
+      ]);
+
+      final stream = results[1] as AnimeStream;
+
+      debugPrint(
+        '[PERF] getStream: ${streamWatch.elapsedMilliseconds}ms',
+      );
 
       if (!mounted || requestId != _loadRequestId) return;
 
@@ -198,7 +327,13 @@ class _AnimePlayerMediaKitScreenState
 
       debugPrint('[PLAYER] Initializing video...');
 
+      final initializeWatch = Stopwatch()..start();
+
       await newController.initialize();
+
+      debugPrint(
+        '[PERF] initialize: ${initializeWatch.elapsedMilliseconds}ms',
+      );
 
       if (!mounted || requestId != _loadRequestId) {
         newController.removeListener(_onPlayerUpdate);
@@ -211,7 +346,14 @@ class _AnimePlayerMediaKitScreenState
       debugPrint('[PLAYER] Size: ${newController.value.size}');
 
       await newController.setPlaybackSpeed(1.0);
+
+      final playWatch = Stopwatch()..start();
+
       await newController.play();
+
+      debugPrint(
+        '[PERF] play call: ${playWatch.elapsedMilliseconds}ms',
+      );
 
       if (!mounted || requestId != _loadRequestId) return;
 
@@ -220,7 +362,14 @@ class _AnimePlayerMediaKitScreenState
         _error = null;
       });
 
+      if (_isFullscreen) {
+        _showFullscreenControls();
+      }
+
       debugPrint('[PLAYER] Playing.');
+      debugPrint(
+        '[PERF] Total until play call: ${totalWatch.elapsedMilliseconds}ms',
+      );
     } catch (e, stackTrace) {
       if (!mounted || requestId != _loadRequestId) {
         if (newController != null && newController != _controller) {
@@ -244,6 +393,77 @@ class _AnimePlayerMediaKitScreenState
       }
 
       if (!mounted || requestId != _loadRequestId) return;
+
+      setState(() {
+        _loading = false;
+        _error = _getReadableError(e);
+      });
+
+      if (_isFullscreen) {
+        _showFullscreenControls();
+      }
+    }
+  }
+
+  Future<void> _onPartSelected(AnimePartDTO part) async {
+    if (part.name == _currentPartName || _loading) return;
+
+    final requestId = ++_partRequestId;
+
+    _loadRequestId++;
+
+    final controller = _controller;
+
+    if (controller != null && controller.value.isPlaying) {
+      await controller.pause();
+    }
+
+    if (!mounted || requestId != _partRequestId) return;
+
+    setState(() {
+      _loading = true;
+      _error = null;
+      _isSeeking = false;
+      _seekValue = null;
+    });
+
+    try {
+      debugPrint('========== CHANGE ANIME PART ==========');
+      debugPrint('[PART] Name: ${part.name}');
+      debugPrint('[PART] URL: ${part.url}');
+
+      final episodeWatch = Stopwatch()..start();
+
+      final newEpisodes = await ref
+          .read(animeServiceProvider)
+          .getEpisodes(part.url)
+          .timeout(const Duration(seconds: 30));
+
+      debugPrint(
+        '[PERF] getEpisodes: ${episodeWatch.elapsedMilliseconds}ms',
+      );
+
+      if (!mounted || requestId != _partRequestId) return;
+
+      if (newEpisodes.isEmpty) {
+        throw Exception('Phần này chưa có tập phim nào.');
+      }
+
+      setState(() {
+        _episodes = List.of(newEpisodes);
+        _currentPartName = part.name;
+        _currentEpisodeIndex = 0;
+        _error = null;
+      });
+
+      debugPrint('[PART] Episodes: ${newEpisodes.length}');
+
+      await _loadEpisode(0);
+    } catch (e, stackTrace) {
+      if (!mounted || requestId != _partRequestId) return;
+
+      debugPrint('[PART ERROR] $e');
+      debugPrint('[PART STACKTRACE] $stackTrace');
 
       setState(() {
         _loading = false;
@@ -280,24 +500,15 @@ class _AnimePlayerMediaKitScreenState
     }
   }
 
-  void _onPartSelected(AnimePartDTO part) {
-    if (part.name == widget.currentPartName) return;
-
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => AnimeDetailScreen(
-          animeUrl: part.url,
-        ),
-      ),
-    );
-  }
+  // ============================================================
+  // FULLSCREEN
+  // ============================================================
 
   Future<void> _toggleFullscreen() async {
     if (_isFullscreen) {
-      await SystemChrome.setEnabledSystemUIMode(
-        SystemUiMode.edgeToEdge,
-      );
+      _fullscreenControlsTimer?.cancel();
+
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
 
       await SystemChrome.setPreferredOrientations([
         DeviceOrientation.portraitUp,
@@ -307,6 +518,7 @@ class _AnimePlayerMediaKitScreenState
 
       setState(() {
         _isFullscreen = false;
+        _fullscreenControlsVisible = true;
       });
     } else {
       await SystemChrome.setPreferredOrientations([
@@ -322,9 +534,16 @@ class _AnimePlayerMediaKitScreenState
 
       setState(() {
         _isFullscreen = true;
+        _fullscreenControlsVisible = true;
       });
+
+      _scheduleFullscreenControlsHide();
     }
   }
+
+  // ============================================================
+  // SEEK
+  // ============================================================
 
   Future<void> _seekRelative(int seconds) async {
     if (_loading) return;
@@ -348,6 +567,14 @@ class _AnimePlayerMediaKitScreenState
     await controller.seekTo(
       Duration(milliseconds: clampedMilliseconds),
     );
+  }
+
+  Future<void> _skipIntro() async {
+    await _seekRelative(_skipIntroSeconds);
+
+    if (_isFullscreen) {
+      _showFullscreenControls();
+    }
   }
 
   Future<void> _seekTo(double milliseconds) async {
@@ -379,6 +606,10 @@ class _AnimePlayerMediaKitScreenState
       setState(() {
         _playbackRate = rate;
       });
+
+      if (_isFullscreen) {
+        _scheduleFullscreenControlsHide();
+      }
     } catch (e) {
       debugPrint('[PLAYER SPEED ERROR] $e');
     }
@@ -399,10 +630,16 @@ class _AnimePlayerMediaKitScreenState
     return '$mm:$ss';
   }
 
+  // ============================================================
+  // BUILD
+  // ============================================================
+
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: colorScheme.surface,
       appBar: _isFullscreen
           ? null
           : AppBar(
@@ -428,6 +665,8 @@ class _AnimePlayerMediaKitScreenState
   }
 
   Widget _buildEmptyState() {
+    final colorScheme = Theme.of(context).colorScheme;
+
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24),
@@ -437,12 +676,13 @@ class _AnimePlayerMediaKitScreenState
             Icon(
               Icons.video_library_outlined,
               size: 56,
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
+              color: colorScheme.onSurfaceVariant,
             ),
             const SizedBox(height: 16),
-            const Text(
+            Text(
               'Chưa có tập phim nào.',
               textAlign: TextAlign.center,
+              style: TextStyle(color: colorScheme.onSurface),
             ),
           ],
         ),
@@ -450,22 +690,77 @@ class _AnimePlayerMediaKitScreenState
     );
   }
 
+  // ============================================================
+  // FULLSCREEN PLAYER
+  // ============================================================
+
   Widget _buildFullscreenPlayer() {
-    return SafeArea(
-      top: false,
-      bottom: false,
-      child: Column(
-        children: [
-          Expanded(
-            child: Center(
-              child: _buildVideo(),
+    final controller = _controller;
+
+    final isPlaying = controller?.value.isPlaying ?? false;
+
+    final canTogglePlayback =
+        controller != null && controller.value.isInitialized && !_loading;
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Positioned.fill(
+          child: Center(
+            child: _buildVideo(),
+          ),
+        ),
+        Positioned.fill(
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onTap: _showFullscreenControls,
+            child: const SizedBox.expand(),
+          ),
+        ),
+        if (_fullscreenControlsVisible && canTogglePlayback)
+          Center(
+            child: Material(
+              color: Colors.black45,
+              shape: const CircleBorder(),
+              child: InkWell(
+                customBorder: const CircleBorder(),
+                onTap: _toggleFullscreenPlayback,
+                child: SizedBox(
+                  width: 68,
+                  height: 68,
+                  child: Icon(
+                    isPlaying
+                        ? Icons.pause_rounded
+                        : Icons.play_arrow_rounded,
+                    color: Colors.white,
+                    size: 44,
+                  ),
+                ),
+              ),
             ),
           ),
-          _buildControlsBar(),
-        ],
-      ),
+        if (_fullscreenControlsVisible)
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: SafeArea(
+              top: false,
+              child: Listener(
+                onPointerDown: (_) {
+                  _scheduleFullscreenControlsHide();
+                },
+                child: _buildControlsBar(),
+              ),
+            ),
+          ),
+      ],
     );
   }
+
+  // ============================================================
+  // NORMAL PLAYER
+  // ============================================================
 
   Widget _buildPlayerArea() {
     final controller = _controller;
@@ -510,14 +805,10 @@ class _AnimePlayerMediaKitScreenState
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const CircularProgressIndicator(
-              color: Colors.white,
-            ),
+            const CircularProgressIndicator(color: Colors.white),
             const SizedBox(height: 12),
             Text(
-              _loading
-                  ? 'Đang tải nguồn phát...'
-                  : 'Đang khởi tạo video...',
+              _loading ? 'Đang tải nguồn phát...' : 'Đang khởi tạo video...',
               style: const TextStyle(
                 color: Colors.white70,
                 fontSize: 13,
@@ -537,35 +828,37 @@ class _AnimePlayerMediaKitScreenState
           Container(
             color: Colors.black38,
             alignment: Alignment.center,
-            child: const CircularProgressIndicator(
-              color: Colors.white,
-            ),
+            child: const CircularProgressIndicator(color: Colors.white),
           ),
         if (_loading)
           Container(
             color: Colors.black54,
             alignment: Alignment.center,
-            child: const CircularProgressIndicator(
-              color: Colors.white,
-            ),
+            child: const CircularProgressIndicator(color: Colors.white),
           ),
       ],
     );
   }
 
+  // ============================================================
+  // PART SELECTOR
+  // ============================================================
+
   Widget _buildPartsChips() {
+    final colorScheme = Theme.of(context).colorScheme;
+
     return Container(
       width: double.infinity,
-      color: Colors.black,
+      color: colorScheme.surface,
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Text(
+          Text(
             'Phần / Mùa',
             style: TextStyle(
-              color: Colors.white,
+              color: colorScheme.onSurface,
               fontSize: 13,
               fontWeight: FontWeight.bold,
             ),
@@ -575,29 +868,29 @@ class _AnimePlayerMediaKitScreenState
             scrollDirection: Axis.horizontal,
             child: Row(
               children: widget.parts.map((part) {
-                final isSelected = part.name == widget.currentPartName;
+                final isSelected = part.name == _currentPartName;
 
                 return Padding(
                   padding: const EdgeInsets.only(right: 8),
                   child: FilterChip(
                     label: Text(part.name),
                     selected: isSelected,
-                    onSelected: (_) => _onPartSelected(part),
+                    onSelected: _loading ? null : (_) => _onPartSelected(part),
                     showCheckmark: false,
-                    selectedColor:
-                    Theme.of(context).colorScheme.primaryContainer,
-                    backgroundColor: const Color(0xFF242424),
+                    selectedColor: colorScheme.primaryContainer,
+                    backgroundColor: colorScheme.surfaceContainerHighest,
                     side: BorderSide(
                       color: isSelected
-                          ? Theme.of(context).colorScheme.primary
-                          : Colors.white24,
+                          ? colorScheme.primary
+                          : colorScheme.outlineVariant,
                     ),
                     labelStyle: TextStyle(
                       color: isSelected
-                          ? Theme.of(context).colorScheme.onPrimaryContainer
-                          : Colors.white,
-                      fontWeight:
-                      isSelected ? FontWeight.bold : FontWeight.normal,
+                          ? colorScheme.onPrimaryContainer
+                          : colorScheme.onSurface,
+                      fontWeight: isSelected
+                          ? FontWeight.bold
+                          : FontWeight.normal,
                     ),
                   ),
                 );
@@ -609,19 +902,19 @@ class _AnimePlayerMediaKitScreenState
     );
   }
 
+  // ============================================================
+  // PLAYER CONTROLS
+  // ============================================================
+
   Widget _buildControlsBar() {
+    final colorScheme = Theme.of(context).colorScheme;
     final controller = _controller;
 
-    final initialized =
-        controller != null && controller.value.isInitialized;
+    final initialized = controller != null && controller.value.isInitialized;
 
-    final duration = initialized
-        ? controller.value.duration
-        : Duration.zero;
+    final duration = initialized ? controller.value.duration : Duration.zero;
 
-    final position = initialized
-        ? controller.value.position
-        : Duration.zero;
+    final position = initialized ? controller.value.position : Duration.zero;
 
     final maxMilliseconds = duration.inMilliseconds > 0
         ? duration.inMilliseconds.toDouble()
@@ -629,16 +922,13 @@ class _AnimePlayerMediaKitScreenState
 
     final currentMilliseconds = _isSeeking
         ? (_seekValue ?? 0).clamp(0.0, maxMilliseconds)
-        : position.inMilliseconds.toDouble().clamp(
-      0.0,
-      maxMilliseconds,
-    );
+        : position.inMilliseconds.toDouble().clamp(0.0, maxMilliseconds);
 
     final enabled = initialized && !_loading;
 
     return Container(
       width: double.infinity,
-      color: Colors.black,
+      color: colorScheme.surfaceContainerHighest,
       padding: const EdgeInsets.fromLTRB(8, 0, 8, 2),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -652,13 +942,18 @@ class _AnimePlayerMediaKitScreenState
               overlayShape: const RoundSliderOverlayShape(
                 overlayRadius: 10,
               ),
+              activeTrackColor: colorScheme.primary,
+              inactiveTrackColor:
+              colorScheme.onSurface.withValues(alpha: 0.24),
+              thumbColor: colorScheme.primary,
+              overlayColor: colorScheme.primary.withValues(alpha: 0.12),
             ),
             child: Slider(
               min: 0,
               max: maxMilliseconds,
               value: currentMilliseconds,
-              activeColor: Theme.of(context).colorScheme.primary,
-              inactiveColor: Colors.white30,
+              activeColor: colorScheme.primary,
+              inactiveColor: colorScheme.onSurface.withValues(alpha: 0.24),
               onChanged: enabled && duration.inMilliseconds > 0
                   ? (value) {
                 setState(() {
@@ -704,9 +999,16 @@ class _AnimePlayerMediaKitScreenState
                 onPressed: () => _seekRelative(10),
               ),
               _buildControlButton(
+                icon: Icons.fast_forward,
+                tooltip: 'Skip Intro (+90 giây)',
+                enabled: enabled,
+                onPressed: _skipIntro,
+              ),
+              _buildControlButton(
                 icon: Icons.skip_next,
                 tooltip: 'Tập tiếp theo',
-                enabled: enabled && _currentEpisodeIndex < _episodes.length - 1,
+                enabled: enabled &&
+                    _currentEpisodeIndex < _episodes.length - 1,
                 onPressed: _nextEpisode,
               ),
               const SizedBox(width: 6),
@@ -723,27 +1025,27 @@ class _AnimePlayerMediaKitScreenState
                             milliseconds: currentMilliseconds.round(),
                           ),
                         ),
-                        style: const TextStyle(
-                          color: Colors.white,
+                        style: TextStyle(
+                          color: colorScheme.onSurface,
                           fontSize: 12,
-                          fontFeatures: [
+                          fontFeatures: const [
                             FontFeature.tabularFigures(),
                           ],
                         ),
                       ),
-                      const Text(
+                      Text(
                         ' / ',
                         style: TextStyle(
-                          color: Colors.white70,
+                          color: colorScheme.onSurfaceVariant,
                           fontSize: 12,
                         ),
                       ),
                       Text(
                         _formatDuration(duration),
-                        style: const TextStyle(
-                          color: Colors.white70,
+                        style: TextStyle(
+                          color: colorScheme.onSurfaceVariant,
                           fontSize: 12,
-                          fontFeatures: [
+                          fontFeatures: const [
                             FontFeature.tabularFigures(),
                           ],
                         ),
@@ -756,7 +1058,7 @@ class _AnimePlayerMediaKitScreenState
                 enabled: enabled,
                 tooltip: 'Tốc độ phát',
                 initialValue: _playbackRate,
-                color: const Color(0xFF242424),
+                color: colorScheme.surfaceContainer,
                 onSelected: _changePlaybackRate,
                 itemBuilder: (context) {
                   return _playbackRates.map((rate) {
@@ -772,8 +1074,8 @@ class _AnimePlayerMediaKitScreenState
                               '${rate}x',
                               style: TextStyle(
                                 color: selected
-                                    ? Theme.of(context).colorScheme.primary
-                                    : Colors.white,
+                                    ? colorScheme.primary
+                                    : colorScheme.onSurface,
                                 fontWeight: selected
                                     ? FontWeight.bold
                                     : FontWeight.normal,
@@ -784,7 +1086,7 @@ class _AnimePlayerMediaKitScreenState
                             Icon(
                               Icons.check,
                               size: 18,
-                              color: Theme.of(context).colorScheme.primary,
+                              color: colorScheme.primary,
                             ),
                         ],
                       ),
@@ -795,8 +1097,8 @@ class _AnimePlayerMediaKitScreenState
                   padding: const EdgeInsets.symmetric(horizontal: 6),
                   child: Text(
                     '${_playbackRate}x',
-                    style: const TextStyle(
-                      color: Colors.white,
+                    style: TextStyle(
+                      color: colorScheme.onSurface,
                       fontSize: 12,
                       fontWeight: FontWeight.w600,
                     ),
@@ -810,7 +1112,7 @@ class _AnimePlayerMediaKitScreenState
                   minWidth: 36,
                   minHeight: 40,
                 ),
-                color: Colors.white,
+                color: colorScheme.onSurface,
                 tooltip: _isFullscreen
                     ? 'Thoát toàn màn hình'
                     : 'Toàn màn hình',
@@ -835,6 +1137,8 @@ class _AnimePlayerMediaKitScreenState
     required bool enabled,
     required VoidCallback onPressed,
   }) {
+    final colorScheme = Theme.of(context).colorScheme;
+
     return IconButton(
       visualDensity: VisualDensity.compact,
       padding: EdgeInsets.zero,
@@ -842,13 +1146,10 @@ class _AnimePlayerMediaKitScreenState
         minWidth: 34,
         minHeight: 40,
       ),
-      color: Colors.white,
-      disabledColor: Colors.white24,
+      color: colorScheme.onSurface,
+      disabledColor: colorScheme.onSurface.withValues(alpha: 0.24),
       tooltip: tooltip,
-      icon: Icon(
-        icon,
-        size: 25,
-      ),
+      icon: Icon(icon, size: 25),
       onPressed: enabled ? onPressed : null,
     );
   }
@@ -857,6 +1158,7 @@ class _AnimePlayerMediaKitScreenState
     required VideoPlayerController? controller,
     required bool enabled,
   }) {
+    final colorScheme = Theme.of(context).colorScheme;
     final isPlaying = controller?.value.isPlaying ?? false;
 
     return IconButton(
@@ -866,8 +1168,8 @@ class _AnimePlayerMediaKitScreenState
         minWidth: 40,
         minHeight: 42,
       ),
-      color: Colors.white,
-      disabledColor: Colors.white24,
+      color: colorScheme.onSurface,
+      disabledColor: colorScheme.onSurface.withValues(alpha: 0.24),
       tooltip: isPlaying ? 'Tạm dừng' : 'Phát',
       icon: Icon(
         isPlaying ? Icons.pause : Icons.play_arrow,
@@ -885,29 +1187,39 @@ class _AnimePlayerMediaKitScreenState
         } else {
           currentController.play();
         }
+
+        if (_isFullscreen) {
+          _showFullscreenControls();
+        }
       },
     );
   }
 
+  // ============================================================
+  // ERROR
+  // ============================================================
+
   Widget _buildErrorState() {
+    final colorScheme = Theme.of(context).colorScheme;
+
     return Container(
       width: double.infinity,
-      color: Colors.black87,
+      color: colorScheme.surfaceContainerHighest,
       padding: const EdgeInsets.all(24),
       child: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(
+            Icon(
               Icons.error_outline,
-              color: Colors.white,
+              color: colorScheme.error,
               size: 48,
             ),
             const SizedBox(height: 16),
-            const Text(
+            Text(
               'Lỗi phát video',
               style: TextStyle(
-                color: Colors.white,
+                color: colorScheme.onSurface,
                 fontSize: 18,
                 fontWeight: FontWeight.bold,
               ),
@@ -915,8 +1227,8 @@ class _AnimePlayerMediaKitScreenState
             const SizedBox(height: 8),
             Text(
               _error ?? 'Không thể phát video.',
-              style: const TextStyle(
-                color: Colors.white70,
+              style: TextStyle(
+                color: colorScheme.onSurfaceVariant,
                 fontSize: 12,
               ),
               textAlign: TextAlign.center,
@@ -935,8 +1247,12 @@ class _AnimePlayerMediaKitScreenState
     );
   }
 
+  // ============================================================
+  // EPISODE LIST
+  // ============================================================
+
   Widget _buildEpisodeList() {
-    final currentEpisode = _episodes[_currentEpisodeIndex];
+    final colorScheme = Theme.of(context).colorScheme;
 
     return SizedBox(
       height: 100,
@@ -946,54 +1262,15 @@ class _AnimePlayerMediaKitScreenState
           Padding(
             padding: const EdgeInsets.symmetric(
               horizontal: 12,
-              vertical: 2,
+              vertical: 4,
             ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'Tập ${currentEpisode.number}: ${currentEpisode.title}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-                IconButton(
-                  visualDensity: VisualDensity.compact,
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(
-                    minWidth: 32,
-                    minHeight: 32,
-                  ),
-                  tooltip: 'Tập trước',
-                  icon: const Icon(
-                    Icons.skip_previous,
-                    size: 20,
-                  ),
-                  onPressed: _currentEpisodeIndex > 0 && !_loading
-                      ? _previousEpisode
-                      : null,
-                ),
-                IconButton(
-                  visualDensity: VisualDensity.compact,
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(
-                    minWidth: 32,
-                    minHeight: 32,
-                  ),
-                  tooltip: 'Tập tiếp theo',
-                  icon: const Icon(
-                    Icons.skip_next,
-                    size: 20,
-                  ),
-                  onPressed: _currentEpisodeIndex < _episodes.length - 1 &&
-                      !_loading
-                      ? _nextEpisode
-                      : null,
-                ),
-              ],
+            child: Text(
+              'Danh sách tập',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: colorScheme.onSurface,
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+              ),
             ),
           ),
           Expanded(
@@ -1012,8 +1289,8 @@ class _AnimePlayerMediaKitScreenState
                   padding: const EdgeInsets.only(right: 6),
                   child: Material(
                     color: isCurrent
-                        ? Theme.of(context).colorScheme.primaryContainer
-                        : Theme.of(context).colorScheme.surfaceContainerHighest,
+                        ? colorScheme.primaryContainer
+                        : colorScheme.surfaceContainerHighest,
                     borderRadius: BorderRadius.circular(6),
                     child: InkWell(
                       borderRadius: BorderRadius.circular(6),
@@ -1028,8 +1305,8 @@ class _AnimePlayerMediaKitScreenState
                           borderRadius: BorderRadius.circular(6),
                           border: Border.all(
                             color: isCurrent
-                                ? Theme.of(context).colorScheme.primary
-                                : Theme.of(context).colorScheme.outlineVariant,
+                                ? colorScheme.primary
+                                : colorScheme.outlineVariant,
                           ),
                         ),
                         child: Column(
@@ -1043,10 +1320,8 @@ class _AnimePlayerMediaKitScreenState
                                 fontSize: 12,
                                 fontWeight: FontWeight.bold,
                                 color: isCurrent
-                                    ? Theme.of(context)
-                                    .colorScheme
-                                    .onPrimaryContainer
-                                    : Theme.of(context).colorScheme.onSurface,
+                                    ? colorScheme.onPrimaryContainer
+                                    : colorScheme.onSurface,
                               ),
                             ),
                             const SizedBox(height: 2),
@@ -1059,13 +1334,9 @@ class _AnimePlayerMediaKitScreenState
                                 fontSize: 9,
                                 height: 1.1,
                                 color: isCurrent
-                                    ? Theme.of(context)
-                                    .colorScheme
-                                    .onPrimaryContainer
+                                    ? colorScheme.onPrimaryContainer
                                     .withValues(alpha: 0.8)
-                                    : Theme.of(context)
-                                    .colorScheme
-                                    .onSurfaceVariant,
+                                    : colorScheme.onSurfaceVariant,
                               ),
                             ),
                           ],
