@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 
 import '../../config/api_config.dart';
 import '../models/anime.dart';
+import '../../models/anime_part_dto.dart';
 
 class AnimeService {
   String get _baseUrl => ApiConfig.animeUrl;
@@ -264,5 +265,30 @@ class AnimeService {
     }
 
     throw _httpError('Lấy providers thất bại', res);
+  }
+
+  // ============================================================
+  // PARTS
+  // ============================================================
+
+  Future<List<AnimePartDTO>> getParts(String animeUrl) async {
+    final uri = Uri.parse('$_baseUrl/parts').replace(
+      queryParameters: {'url': animeUrl},
+    );
+
+    final res = await http.get(uri);
+
+    if (res.statusCode == 200) {
+      final decoded = _decodeList(
+        res.body,
+        errorMessage: 'Dữ liệu phần không hợp lệ',
+      );
+
+      return decoded
+          .map((item) => AnimePartDTO.fromJson(item as Map<String, dynamic>))
+          .toList();
+    }
+
+    throw _httpError('Lấy danh sách phần thất bại', res);
   }
 }
