@@ -1,4 +1,3 @@
-
 import 'dart:convert';
 import 'dart:io';
 
@@ -20,14 +19,12 @@ class AnimeDetailScreen extends ConsumerStatefulWidget {
   const AnimeDetailScreen({super.key, required this.animeUrl});
 
   @override
-  ConsumerState<AnimeDetailScreen> createState() =>
-      _AnimeDetailScreenState();
+  ConsumerState<AnimeDetailScreen> createState() => _AnimeDetailScreenState();
 }
 
 class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
   final AnimeService _animeService = AnimeService();
-  final AnimeDownloadService _downloadService =
-      AnimeDownloadService.instance;
+  final AnimeDownloadService _downloadService = AnimeDownloadService.instance;
 
   AnimeDetail? _detail;
   bool _loading = true;
@@ -82,10 +79,7 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
       _loading = false;
     });
 
-    await Future.wait([
-      _loadParts(),
-      _loadDownloadStates(detail),
-    ]);
+    await Future.wait([_loadParts(), _loadDownloadStates(detail)]);
   }
 
   Future<void> _loadOfflineDetail() async {
@@ -129,12 +123,8 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
       }
     }
 
-    if (animeDirectory == null ||
-        animeTitle == null ||
-        animeTitle.isEmpty) {
-      throw Exception(
-        'Anime này chưa được tải xuống hoặc dữ liệu đã bị xóa.',
-      );
+    if (animeDirectory == null || animeTitle == null || animeTitle.isEmpty) {
+      throw Exception('Anime này chưa được tải xuống hoặc dữ liệu đã bị xóa.');
     }
 
     final episodes = <AnimeEpisode>[];
@@ -155,8 +145,7 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
       }
 
       try {
-        final completeData =
-        jsonDecode(await completeFile.readAsString());
+        final completeData = jsonDecode(await completeFile.readAsString());
 
         if (completeData is! Map<String, dynamic>) continue;
         if (completeData['completed'] != true) continue;
@@ -169,8 +158,7 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
             ? numberValue
             : int.tryParse(numberValue?.toString() ?? '') ?? 0;
 
-        final episodeUrl =
-            completeData['episodeUrl']?.toString() ?? '';
+        final episodeUrl = completeData['episodeUrl']?.toString() ?? '';
 
         if (episodeNumber <= 0 || episodeUrl.isEmpty) continue;
 
@@ -232,8 +220,7 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
 
       if (!mounted) return;
 
-      final matchingParts =
-      parts.where((part) => part.url == widget.animeUrl);
+      final matchingParts = parts.where((part) => part.url == widget.animeUrl);
 
       setState(() {
         _parts = parts;
@@ -261,8 +248,7 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
         );
 
         try {
-          final downloaded =
-          await _downloadService.isEpisodeDownloaded(
+          final downloaded = await _downloadService.isEpisodeDownloaded(
             animeTitle: detail.title,
             animeUrl: widget.animeUrl,
             episode: episode,
@@ -322,16 +308,11 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
     if (detail == null) return [];
 
     return detail.episodes
-        .where(
-          (episode) => !_isEpisodeUnavailableForSelection(episode),
-    )
+        .where((episode) => !_isEpisodeUnavailableForSelection(episode))
         .toList();
   }
 
-  void _toggleEpisodeSelection(
-      AnimeEpisode episode,
-      bool selected,
-      ) {
+  void _toggleEpisodeSelection(AnimeEpisode episode, bool selected) {
     if (_isEpisodeUnavailableForSelection(episode)) return;
 
     final downloadId = _downloadIdFor(episode);
@@ -348,10 +329,10 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
   void _toggleSelectAll() {
     final selectable = _selectableEpisodes;
 
-    final allSelected = selectable.isNotEmpty &&
+    final allSelected =
+        selectable.isNotEmpty &&
         selectable.every(
-              (episode) =>
-              _selectedEpisodes.contains(_downloadIdFor(episode)),
+          (episode) => _selectedEpisodes.contains(_downloadIdFor(episode)),
         );
 
     setState(() {
@@ -368,9 +349,9 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
   }
 
   Future<void> _downloadOneSelectedEpisode(
-      AnimeDetail detail,
-      AnimeEpisode episode,
-      ) async {
+    AnimeDetail detail,
+    AnimeEpisode episode,
+  ) async {
     final downloadId = _downloadIdFor(episode);
 
     try {
@@ -380,8 +361,7 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
         _checkingDownloads.add(downloadId);
       });
 
-      final alreadyDownloaded =
-      await _downloadService.isEpisodeDownloaded(
+      final alreadyDownloaded = await _downloadService.isEpisodeDownloaded(
         animeTitle: detail.title,
         animeUrl: widget.animeUrl,
         episode: episode,
@@ -406,8 +386,7 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
 
       if (!mounted) return;
 
-      final downloaded =
-      await _downloadService.isEpisodeDownloaded(
+      final downloaded = await _downloadService.isEpisodeDownloaded(
         animeTitle: detail.title,
         animeUrl: widget.animeUrl,
         episode: episode,
@@ -419,9 +398,7 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
         _downloadedEpisodes[downloadId] = downloaded;
       });
     } catch (e) {
-      debugPrint(
-        '[ANIME BATCH DOWNLOAD] Episode ${episode.number}: $e',
-      );
+      debugPrint('[ANIME BATCH DOWNLOAD] Episode ${episode.number}: $e');
     } finally {
       if (mounted && _checkingDownloads.contains(downloadId)) {
         setState(() {
@@ -443,9 +420,7 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
 
     if (selected.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Không có tập hợp lệ để tải xuống.'),
-        ),
+        const SnackBar(content: Text('Không có tập hợp lệ để tải xuống.')),
       );
       return;
     }
@@ -456,9 +431,7 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
     });
 
     await Future.wait(
-      selected.map(
-            (episode) => _downloadOneSelectedEpisode(detail, episode),
-      ),
+      selected.map((episode) => _downloadOneSelectedEpisode(detail, episode)),
     );
 
     if (!mounted) return;
@@ -467,7 +440,7 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
       SnackBar(
         content: Text(
           'Đã xử lý xong ${selected.length} tập. '
-              'Các tập bị hủy hoặc lỗi có thể chọn tải lại.',
+          'Các tập bị hủy hoặc lỗi có thể chọn tải lại.',
         ),
         duration: const Duration(seconds: 4),
       ),
@@ -478,9 +451,7 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
     if (_isOffline) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text(
-            'Không thể chuyển phần/mùa khi đang offline.',
-          ),
+          content: Text('Không thể chuyển phần/mùa khi đang offline.'),
         ),
       );
       return;
@@ -493,9 +464,7 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
     if (part.url == widget.animeUrl) return;
 
     Navigator.of(context).pushReplacement(
-      MaterialPageRoute(
-        builder: (_) => AnimeDetailScreen(animeUrl: part.url),
-      ),
+      MaterialPageRoute(builder: (_) => AnimeDetailScreen(animeUrl: part.url)),
     );
   }
 
@@ -531,9 +500,7 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Hủy tải xuống?'),
-        content: const Text(
-          'Bạn có chắc chắn muốn hủy tải tập này không?',
-        ),
+        content: const Text('Bạn có chắc chắn muốn hủy tải tập này không?'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -577,9 +544,7 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
         episode: targetEpisode,
       );
     } catch (e) {
-      debugPrint(
-        '[ANIME CANCEL] Cannot refresh episode state: $e',
-      );
+      debugPrint('[ANIME CANCEL] Cannot refresh episode state: $e');
     }
 
     if (!mounted) return;
@@ -597,30 +562,21 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
   Widget build(BuildContext context) {
     if (_loading) {
       return Scaffold(
-        appBar: AppBar(
-          title: const Text('Chi tiết Anime'),
-        ),
-        body: const Center(
-          child: CircularProgressIndicator(),
-        ),
+        appBar: AppBar(title: const Text('Chi tiết Anime')),
+        body: const Center(child: CircularProgressIndicator()),
       );
     }
 
     if (_error != null) {
       return Scaffold(
-        appBar: AppBar(
-          title: const Text('Chi tiết Anime'),
-        ),
+        appBar: AppBar(title: const Text('Chi tiết Anime')),
         body: Center(
           child: Padding(
             padding: const EdgeInsets.all(24),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Text(
-                  'Lỗi: $_error',
-                  textAlign: TextAlign.center,
-                ),
+                Text('Lỗi: $_error', textAlign: TextAlign.center),
                 const SizedBox(height: 16),
                 ElevatedButton(
                   onPressed: _loadDetail,
@@ -635,21 +591,17 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
 
     if (_detail == null) {
       return Scaffold(
-        appBar: AppBar(
-          title: const Text('Chi tiết Anime'),
-        ),
-        body: const Center(
-          child: Text('Không tìm thấy thông tin anime'),
-        ),
+        appBar: AppBar(title: const Text('Chi tiết Anime')),
+        body: const Center(child: Text('Không tìm thấy thông tin anime')),
       );
     }
 
     final selectableEpisodes = _selectableEpisodes;
 
-    final allSelectableSelected = selectableEpisodes.isNotEmpty &&
+    final allSelectableSelected =
+        selectableEpisodes.isNotEmpty &&
         selectableEpisodes.every(
-              (episode) =>
-              _selectedEpisodes.contains(_downloadIdFor(episode)),
+          (episode) => _selectedEpisodes.contains(_downloadIdFor(episode)),
         );
 
     return Scaffold(
@@ -670,15 +622,10 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
             ),
           if (_selectionMode) ...[
             IconButton(
-              tooltip: allSelectableSelected
-                  ? 'Bỏ chọn tất cả'
-                  : 'Chọn tất cả',
-              onPressed:
-              selectableEpisodes.isEmpty ? null : _toggleSelectAll,
+              tooltip: allSelectableSelected ? 'Bỏ chọn tất cả' : 'Chọn tất cả',
+              onPressed: selectableEpisodes.isEmpty ? null : _toggleSelectAll,
               icon: Icon(
-                allSelectableSelected
-                    ? Icons.deselect
-                    : Icons.select_all,
+                allSelectableSelected ? Icons.deselect : Icons.select_all,
               ),
             ),
             IconButton(
@@ -708,52 +655,47 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
       ),
       bottomNavigationBar: _selectionMode
           ? SafeArea(
-        child: Container(
-          padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surface,
-            border: Border(
-              top: BorderSide(
-                color:
-                Theme.of(context).colorScheme.outlineVariant,
-              ),
-            ),
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surface,
+                  border: Border(
+                    top: BorderSide(
+                      color: Theme.of(context).colorScheme.outlineVariant,
+                    ),
+                  ),
+                ),
+                child: Row(
                   children: [
-                    Text(
-                      '${_selectedEpisodes.length} tập đã chọn',
-                      style: Theme.of(context)
-                          .textTheme
-                          .titleSmall
-                          ?.copyWith(
-                        fontWeight: FontWeight.bold,
+                    Expanded(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${_selectedEpisodes.length} tập đã chọn',
+                            style: Theme.of(context).textTheme.titleSmall
+                                ?.copyWith(fontWeight: FontWeight.bold),
+                          ),
+                          Text(
+                            '${selectableEpisodes.length} tập có thể tải',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ],
                       ),
                     ),
-                    Text(
-                      '${selectableEpisodes.length} tập có thể tải',
-                      style: Theme.of(context).textTheme.bodySmall,
+                    const SizedBox(width: 12),
+                    FilledButton.icon(
+                      onPressed: _selectedEpisodes.isEmpty
+                          ? null
+                          : _downloadSelectedEpisodes,
+                      icon: const Icon(Icons.download),
+                      label: const Text('Bắt đầu tải'),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(width: 12),
-              FilledButton.icon(
-                onPressed: _selectedEpisodes.isEmpty
-                    ? null
-                    : _downloadSelectedEpisodes,
-                icon: const Icon(Icons.download),
-                label: const Text('Bắt đầu tải'),
-              ),
-            ],
-          ),
-        ),
-      )
+            )
           : null,
     );
   }
@@ -772,11 +714,9 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
                 imageUrl: cover,
                 fit: BoxFit.cover,
                 placeholder: (_, __) =>
-                const Center(
-                  child: CircularProgressIndicator(),
-                ),
+                    const Center(child: CircularProgressIndicator()),
                 errorWidget: (_, __, ___) =>
-                const Icon(Icons.broken_image, size: 64),
+                    const Icon(Icons.broken_image, size: 64),
               ),
             ),
           Positioned.fill(
@@ -812,18 +752,13 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
                         width: 100,
                         height: 150,
                         color: Colors.grey[800],
-                        child: const Center(
-                          child: CircularProgressIndicator(),
-                        ),
+                        child: const Center(child: CircularProgressIndicator()),
                       ),
                       errorWidget: (_, __, ___) => Container(
                         width: 100,
                         height: 150,
                         color: Colors.grey[800],
-                        child: const Icon(
-                          Icons.broken_image,
-                          size: 40,
-                        ),
+                        child: const Icon(Icons.broken_image, size: 40),
                       ),
                     ),
                   )
@@ -849,13 +784,11 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
                     children: [
                       Text(
                         _detail!.title,
-                        style: Theme.of(context)
-                            .textTheme
-                            .headlineSmall
+                        style: Theme.of(context).textTheme.headlineSmall
                             ?.copyWith(
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                        ),
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -864,15 +797,13 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
                       const SizedBox(height: 12),
                       ElevatedButton.icon(
                         onPressed:
-                        _detail!.episodes.isNotEmpty &&
-                            !_selectionMode
+                            _detail!.episodes.isNotEmpty && !_selectionMode
                             ? () => _openPlayer(0)
                             : null,
                         icon: const Icon(Icons.play_circle_fill),
                         label: const Text('Xem ngay'),
                         style: ElevatedButton.styleFrom(
-                          minimumSize:
-                          const Size(double.infinity, 48),
+                          minimumSize: const Size(double.infinity, 48),
                         ),
                       ),
                     ],
@@ -894,10 +825,9 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
         children: [
           Text(
             'Phần / Mùa (${_parts.length})',
-            style: Theme.of(context)
-                .textTheme
-                .titleMedium
-                ?.copyWith(fontWeight: FontWeight.bold),
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 8),
           SingleChildScrollView(
@@ -906,7 +836,7 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
               children: _parts.map((part) {
                 final isSelected =
                     _selectedPartName == part.name &&
-                        part.url == widget.animeUrl;
+                    part.url == widget.animeUrl;
 
                 return Padding(
                   padding: const EdgeInsets.only(right: 8),
@@ -916,14 +846,12 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
                     onSelected: _selectionMode
                         ? null
                         : (_) => _onPartChanged(part),
-                    selectedColor: Theme.of(context)
-                        .colorScheme
-                        .primaryContainer,
+                    selectedColor: Theme.of(
+                      context,
+                    ).colorScheme.primaryContainer,
                     labelStyle: TextStyle(
                       color: isSelected
-                          ? Theme.of(context)
-                          .colorScheme
-                          .onPrimaryContainer
+                          ? Theme.of(context).colorScheme.onPrimaryContainer
                           : Theme.of(context).colorScheme.onSurface,
                       fontWeight: isSelected
                           ? FontWeight.bold
@@ -963,28 +891,14 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
     }
 
     if (_detail!.year.isNotEmpty) {
-      chips.add(
-        _MetaChip(
-          icon: Icons.calendar_today,
-          label: _detail!.year,
-        ),
-      );
+      chips.add(_MetaChip(icon: Icons.calendar_today, label: _detail!.year));
     }
 
     if (_detail!.type.isNotEmpty) {
-      chips.add(
-        _MetaChip(
-          icon: Icons.category,
-          label: _detail!.type,
-        ),
-      );
+      chips.add(_MetaChip(icon: Icons.category, label: _detail!.type));
     }
 
-    return Wrap(
-      spacing: 8,
-      runSpacing: 8,
-      children: chips,
-    );
+    return Wrap(spacing: 8, runSpacing: 8, children: chips);
   }
 
   // Danh sách tập sử dụng chung một GridView cho cả hai chế độ.
@@ -994,9 +908,7 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
     if (episodes.isEmpty) {
       return const Padding(
         padding: EdgeInsets.all(16),
-        child: Text(
-          'Anime này chưa có tập nào được tải xuống.',
-        ),
+        child: Text('Anime này chưa có tập nào được tải xuống.'),
       );
     }
 
@@ -1007,10 +919,9 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
         children: [
           Text(
             'Danh sách tập (${episodes.length})',
-            style: Theme.of(context)
-                .textTheme
-                .titleMedium
-                ?.copyWith(fontWeight: FontWeight.bold),
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 12),
           LayoutBuilder(
@@ -1023,8 +934,7 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
                 physics: const NeverScrollableScrollPhysics(),
                 padding: EdgeInsets.zero,
                 itemCount: episodes.length,
-                gridDelegate:
-                SliverGridDelegateWithFixedCrossAxisCount(
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                   crossAxisCount: crossAxisCount,
                   crossAxisSpacing: spacing,
                   mainAxisSpacing: spacing,
@@ -1038,18 +948,12 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
                     episode: episode,
                     downloadId: downloadId,
                     downloadService: _downloadService,
-                    isDownloaded:
-                    _downloadedEpisodes[downloadId] == true,
-                    isChecking:
-                    _checkingDownloads.contains(downloadId),
+                    isDownloaded: _downloadedEpisodes[downloadId] == true,
+                    isChecking: _checkingDownloads.contains(downloadId),
                     selectionMode: _selectionMode,
-                    isSelected:
-                    _selectedEpisodes.contains(downloadId),
+                    isSelected: _selectedEpisodes.contains(downloadId),
                     onSelectionChanged: (selected) =>
-                        _toggleEpisodeSelection(
-                          episode,
-                          selected,
-                        ),
+                        _toggleEpisodeSelection(episode, selected),
                     onTap: () => _openPlayer(index),
                     onPause: () => _pauseDownload(downloadId),
                     onResume: () => _resumeDownload(downloadId),
@@ -1069,59 +973,76 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
       return const SizedBox.shrink();
     }
 
+    Widget buildGrid(List<String> items) {
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          const spacing = 8.0;
+          const crossAxisCount = 3;
+
+          return GridView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            padding: EdgeInsets.zero,
+            itemCount: items.length,
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: crossAxisCount,
+              crossAxisSpacing: spacing,
+              mainAxisSpacing: spacing,
+              mainAxisExtent: 42,
+            ),
+            itemBuilder: (context, index) {
+              return Container(
+                alignment: Alignment.center,
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.secondaryContainer,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: Theme.of(context).colorScheme.outlineVariant,
+                  ),
+                ),
+                child: Text(
+                  items[index],
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w500,
+                    color: Theme.of(context).colorScheme.onSecondaryContainer,
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      );
+    }
+
     return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 16,
-        vertical: 8,
-      ),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (_detail!.genres.isNotEmpty) ...[
             Text(
               'Thể loại',
-              style: Theme.of(context)
-                  .textTheme
-                  .titleMedium
-                  ?.copyWith(fontWeight: FontWeight.bold),
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
             ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: _detail!.genres
-                  .map(
-                    (genre) => Chip(
-                  label: Text(genre),
-                  backgroundColor: Theme.of(context)
-                      .colorScheme
-                      .secondaryContainer,
-                ),
-              )
-                  .toList(),
-            ),
+            const SizedBox(height: 12),
+            buildGrid(_detail!.genres),
             const SizedBox(height: 16),
           ],
           if (_detail!.studios.isNotEmpty) ...[
             Text(
               'Studio',
-              style: Theme.of(context)
-                  .textTheme
-                  .titleMedium
-                  ?.copyWith(fontWeight: FontWeight.bold),
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
             ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: _detail!.studios
-                  .map(
-                    (studio) => Chip(
-                  label: Text(studio),
-                ),
-              )
-                  .toList(),
-            ),
+            const SizedBox(height: 12),
+            buildGrid(_detail!.studios),
           ],
         ],
       ),
@@ -1140,10 +1061,9 @@ class _AnimeDetailScreenState extends ConsumerState<AnimeDetailScreen> {
         children: [
           Text(
             'Nội dung',
-            style: Theme.of(context)
-                .textTheme
-                .titleMedium
-                ?.copyWith(fontWeight: FontWeight.bold),
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 8),
           Text(
@@ -1186,9 +1106,9 @@ class _EpisodeDownloadItem extends StatelessWidget {
   });
 
   Widget _buildProgressIndicator(
-      BuildContext context,
-      AnimeDownloadProgress progress,
-      ) {
+    BuildContext context,
+    AnimeDownloadProgress progress,
+  ) {
     final colorScheme = Theme.of(context).colorScheme;
 
     final isMerging = progress.status.contains('ghép video');
@@ -1209,9 +1129,7 @@ class _EpisodeDownloadItem extends StatelessWidget {
               strokeWidth: 2.5,
               backgroundColor: colorScheme.outlineVariant,
               valueColor: AlwaysStoppedAnimation<Color>(
-                progress.isPaused
-                    ? colorScheme.tertiary
-                    : colorScheme.primary,
+                progress.isPaused ? colorScheme.tertiary : colorScheme.primary,
               ),
             ),
           ),
@@ -1226,9 +1144,7 @@ class _EpisodeDownloadItem extends StatelessWidget {
             )
           else
             Icon(
-              progress.isPaused
-                  ? Icons.pause
-                  : Icons.downloading,
+              progress.isPaused ? Icons.pause : Icons.downloading,
               size: 13,
               color: progress.isPaused
                   ? colorScheme.tertiary
@@ -1240,10 +1156,11 @@ class _EpisodeDownloadItem extends StatelessWidget {
   }
 
   Widget _buildDownloadStatus(
-      BuildContext context,
-      AnimeDownloadProgress progress,
-      ) {
-    final isActive = progress.isDownloading ||
+    BuildContext context,
+    AnimeDownloadProgress progress,
+  ) {
+    final isActive =
+        progress.isDownloading ||
         progress.isPaused ||
         downloadService.isDownloading(downloadId);
 
@@ -1253,11 +1170,7 @@ class _EpisodeDownloadItem extends StatelessWidget {
       return const SizedBox(
         width: 32,
         height: 32,
-        child: Icon(
-          Icons.check_circle,
-          color: Colors.green,
-          size: 21,
-        ),
+        child: Icon(Icons.check_circle, color: Colors.green, size: 21),
       );
     }
 
@@ -1269,9 +1182,7 @@ class _EpisodeDownloadItem extends StatelessWidget {
           child: SizedBox(
             width: 19,
             height: 19,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-            ),
+            child: CircularProgressIndicator(strokeWidth: 2),
           ),
         ),
       );
@@ -1282,12 +1193,9 @@ class _EpisodeDownloadItem extends StatelessWidget {
         tooltip: progress.status.isEmpty
             ? 'Đang tải'
             : '${progress.status} '
-            '${progress.total > 0 ? '${progress.percent}%' : ''}',
+                  '${progress.total > 0 ? '${progress.percent}%' : ''}',
         padding: EdgeInsets.zero,
-        constraints: const BoxConstraints(
-          minWidth: 40,
-          minHeight: 40,
-        ),
+        constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
         icon: _buildProgressIndicator(context, progress),
         onSelected: (value) {
           if (value == 'pause') onPause();
@@ -1329,11 +1237,7 @@ class _EpisodeDownloadItem extends StatelessWidget {
       return const SizedBox(
         width: 32,
         height: 32,
-        child: Icon(
-          Icons.error_outline,
-          color: Colors.red,
-          size: 21,
-        ),
+        child: Icon(Icons.error_outline, color: Colors.red, size: 21),
       );
     }
 
@@ -1347,7 +1251,8 @@ class _EpisodeDownloadItem extends StatelessWidget {
       builder: (context, progress, _) {
         final colorScheme = Theme.of(context).colorScheme;
 
-        final isSelectionDisabled = isDownloaded ||
+        final isSelectionDisabled =
+            isDownloaded ||
             progress.isCompleted ||
             isChecking ||
             progress.isDownloading ||
@@ -1385,24 +1290,22 @@ class _EpisodeDownloadItem extends StatelessWidget {
                         value: isSelected,
                         onChanged: isSelectionDisabled
                             ? null
-                            : (value) =>
-                            onSelectionChanged(value ?? false),
+                            : (value) => onSelectionChanged(value ?? false),
                         visualDensity: VisualDensity.compact,
-                        materialTapTargetSize:
-                        MaterialTapTargetSize.shrinkWrap,
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                       ),
                     ),
                     const SizedBox(width: 10),
                     Flexible(
-                      child: Text('Tập ${episode.number.toString()}',
+                      child: Text(
+                        'Tập ${episode.number.toString()}',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           fontWeight: FontWeight.w600,
                           color: isSelectionDisabled
-                              ? colorScheme.onSurface
-                              .withValues(alpha: 0.5)
+                              ? colorScheme.onSurface.withValues(alpha: 0.5)
                               : colorScheme.onSurface,
                         ),
                       ),
@@ -1432,9 +1335,7 @@ class _EpisodeDownloadItem extends StatelessWidget {
             decoration: BoxDecoration(
               color: colorScheme.surfaceContainerHighest,
               borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                color: colorScheme.outlineVariant,
-              ),
+              border: Border.all(color: colorScheme.outlineVariant),
             ),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -1448,12 +1349,11 @@ class _EpisodeDownloadItem extends StatelessWidget {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Flexible(
-                          child: Text('Tập ${episode.number.toString()}',
+                          child: Text(
+                            'Tập ${episode.number.toString()}',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w600,
-                            ),
+                            style: const TextStyle(fontWeight: FontWeight.w600),
                           ),
                         ),
                       ],
@@ -1475,22 +1375,14 @@ class _MetaChip extends StatelessWidget {
   final String label;
   final Color? color;
 
-  const _MetaChip({
-    required this.icon,
-    required this.label,
-    this.color,
-  });
+  const _MetaChip({required this.icon, required this.label, this.color});
 
   @override
   Widget build(BuildContext context) {
-    final chipColor =
-        color ?? Theme.of(context).colorScheme.primary;
+    final chipColor = color ?? Theme.of(context).colorScheme.primary;
 
     return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 10,
-        vertical: 4,
-      ),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       decoration: BoxDecoration(
         color: chipColor.withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(16),
