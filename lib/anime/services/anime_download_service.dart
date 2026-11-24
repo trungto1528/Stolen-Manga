@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_kit_config.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
@@ -51,22 +52,100 @@ class _DownloadCancelled implements Exception {
   const _DownloadCancelled();
 }
 
+class _OrderedPipeWriter {
+  final IOSink _sink;
+  final String _downloadId;
+  final Future<void> Function(String) _waitIfPaused;
+  final void Function(String) _checkCancelled;
+
+  int _nextIndex = 0;
+  final Map<int, File> _buffer = {};
+  Future<void> _writeChain = Future<void>.value();
+
+  _OrderedPipeWriter({
+    required IOSink sink,
+    required String downloadId,
+    required Future<void> Function(String) waitIfPaused,
+    required void Function(String) checkCancelled,
+  })  : _sink = sink,
+        _downloadId = downloadId,
+        _waitIfPaused = waitIfPaused,
+        _checkCancelled = checkCancelled;
+
+  Future<void> add(File file, int index) {
+    if (index < _nextIndex || _buffer.containsKey(index)) {
+      return Future.error(
+        StateError('Segment $index đã được đưa vào pipe.'),
+      );
+    }
+
+    _buffer[index] = file;
+    _writeChain = _writeChain.then((_) => _flushReady());
+
+    return _writeChain;
+  }
+
+  Future<void> _flushReady() async {
+    while (true) {
+      _checkCancelled(_downloadId);
+
+      final file = _buffer.remove(_nextIndex);
+
+      if (file == null) return;
+
+      await for (final chunk in file.openRead()) {
+        await _waitIfPaused(_downloadId);
+        _checkCancelled(_downloadId);
+        _sink.add(chunk);
+      }
+
+      await _sink.flush();
+      _nextIndex++;
+    }
+  }
+
+  Future<void> finish(int totalSegments) async {
+    await _writeChain;
+    _checkCancelled(_downloadId);
+
+    if (_buffer.isNotEmpty || _nextIndex != totalSegments) {
+      throw Exception(
+        'Dữ liệu segment chưa liên tục: '
+            'đã ghi $_nextIndex/$totalSegments segment.',
+      );
+    }
+  }
+}
+
 class AnimeDownloadService {
   AnimeDownloadService._();
 
   static final AnimeDownloadService instance = AnimeDownloadService._();
 
-  static const int _maxConcurrentSegments = 6;
+  static const int _maxConcurrentSegments = 12;
   static const int _maxAttempts = 4;
   static const Duration _requestTimeout = Duration(seconds: 60);
+  static const Duration _ffmpegCancelTimeout = Duration(seconds: 5);
+  static const Duration _ffmpegCallbackTimeout = Duration(seconds: 15);
+  static const Duration _ffmpegFinishTimeout = Duration(minutes: 3);
 
   final Map<String, Future<void>> _activeDownloads = {};
-  final Map<String, ValueNotifier<AnimeDownloadProgress>> _progressNotifiers =
-  {};
+
+  final Map<String, ValueNotifier<AnimeDownloadProgress>>
+  _progressNotifiers = {};
 
   final Set<String> _pauseRequested = {};
   final Set<String> _cancelRequested = {};
+  final Set<String> _preserveEpisodeDirectory = {};
+
   final Map<String, Completer<void>> _resumeCompleters = {};
+  final Map<String, Completer<void>> _cancelCompleters = {};
+
+  final Map<String, int> _ffmpegSessionIds = {};
+
+  final Map<String, Set<http.Client>> _activeHttpClients = {};
+
+  final Map<String, Future<File?>> _coverDownloadTasks = {};
 
   ValueNotifier<AnimeDownloadProgress> progressFor(String downloadId) {
     return _progressNotifiers.putIfAbsent(
@@ -134,6 +213,7 @@ class AnimeDownloadService {
     _pauseRequested.remove(downloadId);
 
     final completer = _resumeCompleters.remove(downloadId);
+
     if (completer != null && !completer.isCompleted) {
       completer.complete();
     }
@@ -154,17 +234,54 @@ class AnimeDownloadService {
     _cancelRequested.add(downloadId);
     _pauseRequested.remove(downloadId);
 
-    final completer = _resumeCompleters.remove(downloadId);
-    if (completer != null && !completer.isCompleted) {
-      completer.complete();
+    // Đánh thức tác vụ đang chờ resume.
+    final resumeCompleter = _resumeCompleters.remove(downloadId);
+
+    if (resumeCompleter != null && !resumeCompleter.isCompleted) {
+      resumeCompleter.complete();
     }
 
+    // Đánh thức tác vụ đang chờ FFmpeg hoàn tất.
+    final cancelCompleter = _cancelCompleters[downloadId];
+
+    if (cancelCompleter != null && !cancelCompleter.isCompleted) {
+      cancelCompleter.complete();
+    }
+
+    // Đóng tất cả HTTP client đang tải segment.
+    final clients = _activeHttpClients[downloadId];
+
+    if (clients != null) {
+      for (final client in clients.toList()) {
+        try {
+          client.close();
+        } catch (e) {
+          debugPrint('Không thể đóng HTTP client: $e');
+        }
+      }
+    }
+
+    // Gửi lệnh dừng FFmpeg ngay lập tức.
+    final sessionId = _ffmpegSessionIds[downloadId];
+
+    if (sessionId != null) {
+      unawaited(
+        FFmpegKit.cancel(sessionId).catchError((Object error) {
+          debugPrint('Không thể gửi lệnh hủy FFmpeg: $error');
+        }),
+      );
+    }
+
+    // Giữ isDownloading theo trạng thái tác vụ thực tế.
+    // UI vẫn khóa chọn tập cho đến khi tác vụ cũ kết thúc.
     _updateProgress(
       downloadId,
       status: 'Đang hủy và dọn dữ liệu...',
-      isDownloading: false,
+      isDownloading: true,
       isPaused: false,
       isCancelled: false,
+      isCompleted: false,
+      clearError: true,
     );
   }
 
@@ -182,9 +299,7 @@ class AnimeDownloadService {
       await completer.future;
     }
 
-    if (_cancelRequested.contains(downloadId)) {
-      throw const _DownloadCancelled();
-    }
+    _checkCancelled(downloadId);
   }
 
   void _checkCancelled(String downloadId) {
@@ -223,7 +338,8 @@ class AnimeDownloadService {
       String animeUrl,
       AnimeEpisode episode,
       ) {
-    return '${_createAnimeKey(animeTitle, animeUrl)}_${_createEpisodeKey(episode)}';
+    return '${_createAnimeKey(animeTitle, animeUrl)}_'
+        '${_createEpisodeKey(episode)}';
   }
 
   Future<Directory> _getAnimeDirectory(
@@ -244,7 +360,10 @@ class AnimeDownloadService {
       String animeUrl,
       AnimeEpisode episode,
       ) async {
-    final animeDirectory = await _getAnimeDirectory(animeTitle, animeUrl);
+    final animeDirectory = await _getAnimeDirectory(
+      animeTitle,
+      animeUrl,
+    );
 
     return Directory(
       '${animeDirectory.path}${Platform.pathSeparator}'
@@ -255,6 +374,29 @@ class AnimeDownloadService {
   Future<void> _deleteEpisodeDirectory(Directory directory) async {
     if (await directory.exists()) {
       await directory.delete(recursive: true);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // HTTP CLIENT MANAGEMENT
+  // ---------------------------------------------------------------------------
+
+  void _registerHttpClient(String downloadId, http.Client client) {
+    _activeHttpClients.putIfAbsent(
+      downloadId,
+          () => <http.Client>{},
+    ).add(client);
+  }
+
+  void _unregisterHttpClient(String downloadId, http.Client client) {
+    final clients = _activeHttpClients[downloadId];
+
+    if (clients == null) return;
+
+    clients.remove(client);
+
+    if (clients.isEmpty) {
+      _activeHttpClients.remove(downloadId);
     }
   }
 
@@ -280,6 +422,37 @@ class AnimeDownloadService {
       return null;
     }
 
+    final animeKey = _createAnimeKey(animeTitle, animeUrl);
+    final activeTask = _coverDownloadTasks[animeKey];
+
+    if (activeTask != null) {
+      return activeTask;
+    }
+
+    final task = _downloadAnimeCoverInternal(
+      animeTitle: animeTitle,
+      animeUrl: animeUrl,
+      uri: uri,
+      headers: headers,
+    );
+
+    _coverDownloadTasks[animeKey] = task;
+
+    try {
+      return await task;
+    } finally {
+      if (identical(_coverDownloadTasks[animeKey], task)) {
+        _coverDownloadTasks.remove(animeKey);
+      }
+    }
+  }
+
+  Future<File?> _downloadAnimeCoverInternal({
+    required String animeTitle,
+    required String animeUrl,
+    required Uri uri,
+    Map<String, String>? headers,
+  }) async {
     final animeDirectory = await _getAnimeDirectory(
       animeTitle,
       animeUrl,
@@ -291,19 +464,17 @@ class AnimeDownloadService {
       '${animeDirectory.path}${Platform.pathSeparator}cover.jpg',
     );
 
-    // Không tải lại nếu cover đã tồn tại và hợp lệ.
     if (await coverFile.exists()) {
       try {
         if (await coverFile.length() > 0) {
           return coverFile;
         }
-      } catch (_) {
-        // File không đọc được, thử tải lại.
-      }
+      } catch (_) {}
     }
 
     final temporaryFile = File(
-      '${animeDirectory.path}${Platform.pathSeparator}cover.tmp',
+      '${animeDirectory.path}${Platform.pathSeparator}'
+          'cover_${DateTime.now().microsecondsSinceEpoch}.tmp',
     );
 
     final requestHeaders = <String, String>{
@@ -338,13 +509,15 @@ class AnimeDownloadService {
         return null;
       }
 
-      await temporaryFile.writeAsBytes(
-        bytes,
-        flush: true,
-      );
+      await temporaryFile.writeAsBytes(bytes, flush: true);
 
       if (await coverFile.exists()) {
-        await coverFile.delete();
+        try {
+          if (await coverFile.length() > 0) {
+            await temporaryFile.delete();
+            return coverFile;
+          }
+        } catch (_) {}
       }
 
       await temporaryFile.rename(coverFile.path);
@@ -452,13 +625,20 @@ class AnimeDownloadService {
     required AnimeService animeService,
     String? coverUrl,
   }) async {
-    final downloadId = createDownloadId(animeTitle, animeUrl, episode);
+    final downloadId = createDownloadId(
+      animeTitle,
+      animeUrl,
+      episode,
+    );
 
     final activeTask = _activeDownloads[downloadId];
+
     if (activeTask != null) {
       await activeTask;
       return;
     }
+
+    _cancelCompleters[downloadId] = Completer<void>();
 
     final task = _downloadEpisodeInternal(
       downloadId: downloadId,
@@ -475,13 +655,44 @@ class AnimeDownloadService {
       await task;
     } finally {
       _activeDownloads.remove(downloadId);
+
       _pauseRequested.remove(downloadId);
       _cancelRequested.remove(downloadId);
+      _ffmpegSessionIds.remove(downloadId);
+      _preserveEpisodeDirectory.remove(downloadId);
 
-      final completer = _resumeCompleters.remove(downloadId);
-      if (completer != null && !completer.isCompleted) {
-        completer.complete();
+      final clients = _activeHttpClients.remove(downloadId);
+
+      if (clients != null) {
+        for (final client in clients) {
+          try {
+            client.close();
+          } catch (_) {}
+        }
       }
+
+      final resumeCompleter = _resumeCompleters.remove(downloadId);
+
+      if (resumeCompleter != null && !resumeCompleter.isCompleted) {
+        resumeCompleter.complete();
+      }
+
+      final cancelCompleter = _cancelCompleters.remove(downloadId);
+
+      if (cancelCompleter != null && !cancelCompleter.isCompleted) {
+        cancelCompleter.complete();
+      }
+
+      final currentProgress = progressFor(downloadId).value;
+
+      _updateProgress(
+        downloadId,
+        isDownloading: false,
+        isPaused: false,
+        status: currentProgress.isCancelled
+            ? currentProgress.status
+            : null,
+      );
     }
   }
 
@@ -503,8 +714,16 @@ class AnimeDownloadService {
     final completeMarker = File('${episodeDirectory.path}/complete.json');
 
     try {
-      // Tạo thư mục anime và tải cover ngay khi bắt đầu tải tập.
-      // Lỗi tải cover không làm ảnh hưởng đến quá trình tải video.
+      _checkCancelled(downloadId);
+
+      await _saveAnimeMetadata(
+        animeTitle: animeTitle,
+        animeUrl: animeUrl,
+        coverUrl: coverUrl,
+      );
+
+      _checkCancelled(downloadId);
+
       await _downloadAnimeCover(
         animeTitle: animeTitle,
         animeUrl: animeUrl,
@@ -535,6 +754,7 @@ class AnimeDownloadService {
           isCompleted: true,
           clearError: true,
         );
+
         return;
       }
 
@@ -577,7 +797,10 @@ class AnimeDownloadService {
 
       _checkCancelled(downloadId);
 
-      final segments = await _parseMediaPlaylist(playlistUri, headers);
+      final segments = await _parseMediaPlaylist(
+        playlistUri,
+        headers,
+      );
 
       _checkCancelled(downloadId);
 
@@ -601,11 +824,12 @@ class AnimeDownloadService {
 
       if (await manifestFile.exists()) {
         try {
-          final oldManifest = jsonDecode(await manifestFile.readAsString());
+          final oldManifest = jsonDecode(
+            await manifestFile.readAsString(),
+          );
 
-          shouldReuseSegments =
-              oldManifest is Map &&
-                  oldManifest['fingerprint'] == fingerprint;
+          shouldReuseSegments = oldManifest is Map &&
+              oldManifest['fingerprint'] == fingerprint;
         } catch (_) {
           shouldReuseSegments = false;
         }
@@ -649,7 +873,7 @@ class AnimeDownloadService {
 
       _updateProgress(
         downloadId,
-        status: 'Đang tải segment...',
+        status: 'Đang tải và ghép segment...',
         completed: completed,
         total: segments.length,
         isDownloading: true,
@@ -657,19 +881,23 @@ class AnimeDownloadService {
       );
 
       final client = http.Client();
+      _registerHttpClient(downloadId, client);
 
       try {
-        await _downloadSegments(
+        await _downloadAndMergeStreaming(
           downloadId: downloadId,
           client: client,
           headers: headers,
           segments: segments,
           segmentsDirectory: segmentsDirectory,
+          videoFile: videoFile,
           initialCompleted: completed,
           onProgress: (value) {
+            if (_cancelRequested.contains(downloadId)) return;
+
             _updateProgress(
               downloadId,
-              status: 'Đang tải segment...',
+              status: 'Đang tải và ghép segment...',
               completed: value,
               total: segments.length,
               isDownloading: true,
@@ -679,85 +907,8 @@ class AnimeDownloadService {
         );
       } finally {
         client.close();
+        _unregisterHttpClient(downloadId, client);
       }
-
-      _checkCancelled(downloadId);
-
-      _updateProgress(
-        downloadId,
-        status: 'Đang ghép video MP4...',
-        completed: segments.length,
-        total: segments.length,
-        isDownloading: true,
-        isPaused: false,
-      );
-
-      final concatFile = File('${episodeDirectory.path}/segments.txt');
-
-      await _writeConcatFile(
-        concatFile,
-        segments,
-        segmentsDirectory,
-      );
-
-      _checkCancelled(downloadId);
-
-      final temporaryVideo = File(
-        '${episodeDirectory.path}/video.part.mp4',
-      );
-
-      if (await temporaryVideo.exists()) {
-        await temporaryVideo.delete();
-      }
-
-      final session = await FFmpegKit.executeWithArguments([
-        '-hide_banner',
-        '-loglevel',
-        'error',
-        '-y',
-        '-f',
-        'concat',
-        '-safe',
-        '0',
-        '-i',
-        concatFile.path,
-        '-map',
-        '0:v:0',
-        '-map',
-        '0:a?',
-        '-c',
-        'copy',
-        '-movflags',
-        '+faststart',
-        temporaryVideo.path,
-      ]);
-
-      _checkCancelled(downloadId);
-
-      final returnCode = await session.getReturnCode();
-      final returnCodeValue = returnCode?.getValue();
-
-      if (returnCodeValue != 0) {
-        final output = await session.getOutput();
-
-        throw Exception(
-          'FFmpeg không thể ghép video. '
-              '${output?.trim().isNotEmpty == true ? output : returnCode}',
-        );
-      }
-
-      if (!await temporaryVideo.exists() ||
-          await temporaryVideo.length() < 1024) {
-        throw Exception('File MP4 sau khi ghép không hợp lệ.');
-      }
-
-      _checkCancelled(downloadId);
-
-      if (await videoFile.exists()) {
-        await videoFile.delete();
-      }
-
-      await temporaryVideo.rename(videoFile.path);
 
       _checkCancelled(downloadId);
 
@@ -785,13 +936,8 @@ class AnimeDownloadService {
 
       _checkCancelled(downloadId);
 
-      // Chỉ xóa segment sau khi MP4 và complete.json đã được tạo thành công.
       if (await segmentsDirectory.exists()) {
         await segmentsDirectory.delete(recursive: true);
-      }
-
-      if (await concatFile.exists()) {
-        await concatFile.delete();
       }
 
       if (await manifestFile.exists()) {
@@ -812,17 +958,26 @@ class AnimeDownloadService {
         clearError: true,
       );
     } on _DownloadCancelled {
-      // Worker đã dừng trước khi đi đến đây.
-      // Xóa toàn bộ dữ liệu tạm của riêng tập đang bị hủy.
-      try {
-        await _deleteEpisodeDirectory(episodeDirectory);
-      } catch (e) {
-        debugPrint('Không thể dọn dữ liệu tập đã hủy: $e');
+      final preserveDirectory =
+      _preserveEpisodeDirectory.contains(downloadId);
+
+      if (!preserveDirectory) {
+        try {
+          await _deleteEpisodeDirectory(episodeDirectory);
+        } catch (e) {
+          debugPrint('Không thể dọn dữ liệu tập đã hủy: $e');
+        }
+      } else {
+        debugPrint(
+          'Giữ lại thư mục tập phim vì chưa xác nhận FFmpeg đã kết thúc.',
+        );
       }
 
       _updateProgress(
         downloadId,
-        status: 'Đã hủy tải và dọn dữ liệu',
+        status: preserveDirectory
+            ? 'Đã hủy, giữ dữ liệu tạm để bảo đảm an toàn'
+            : 'Đã hủy tải và dọn dữ liệu',
         completed: 0,
         total: 0,
         isDownloading: false,
@@ -832,6 +987,37 @@ class AnimeDownloadService {
         clearError: true,
       );
     } catch (e) {
+      if (_cancelRequested.contains(downloadId)) {
+        final preserveDirectory =
+        _preserveEpisodeDirectory.contains(downloadId);
+
+        if (!preserveDirectory) {
+          try {
+            await _deleteEpisodeDirectory(episodeDirectory);
+          } catch (cleanupError) {
+            debugPrint(
+              'Không thể dọn dữ liệu tập đã hủy: $cleanupError',
+            );
+          }
+        }
+
+        _updateProgress(
+          downloadId,
+          status: preserveDirectory
+              ? 'Đã hủy, giữ dữ liệu tạm để bảo đảm an toàn'
+              : 'Đã hủy tải và dọn dữ liệu',
+          completed: 0,
+          total: 0,
+          isDownloading: false,
+          isPaused: false,
+          isCancelled: true,
+          isCompleted: false,
+          clearError: true,
+        );
+
+        return;
+      }
+
       _updateProgress(
         downloadId,
         status: 'Tải thất bại',
@@ -846,80 +1032,8 @@ class AnimeDownloadService {
   }
 
   // ---------------------------------------------------------------------------
-  // DOWNLOAD SEGMENTS
+  // DOWNLOAD SEGMENT
   // ---------------------------------------------------------------------------
-
-  Future<void> _downloadSegments({
-    required String downloadId,
-    required http.Client client,
-    required Map<String, String> headers,
-    required List<_HlsSegment> segments,
-    required Directory segmentsDirectory,
-    required int initialCompleted,
-    required ValueChanged<int> onProgress,
-  }) async {
-    var nextIndex = 0;
-    var completed = initialCompleted;
-    Object? firstError;
-
-    final workerCount = segments.length < _maxConcurrentSegments
-        ? segments.length
-        : _maxConcurrentSegments;
-
-    Future<void> worker() async {
-      while (true) {
-        await _waitIfPaused(downloadId);
-
-        if (_cancelRequested.contains(downloadId)) return;
-
-        final currentIndex = nextIndex++;
-        if (currentIndex >= segments.length) return;
-
-        final segment = segments[currentIndex];
-
-        final destination = _segmentFile(
-          segmentsDirectory,
-          segment.index,
-        );
-
-        if (await destination.exists() &&
-            await destination.length() > 0) {
-          continue;
-        }
-
-        try {
-          await _downloadSegment(
-            downloadId: downloadId,
-            client: client,
-            headers: headers,
-            segment: segment,
-            destination: destination,
-          );
-
-          completed++;
-          onProgress(completed);
-        } on _DownloadCancelled {
-          return;
-        } catch (e) {
-          firstError ??= e;
-          _cancelRequested.add(downloadId);
-          return;
-        }
-      }
-    }
-
-    await Future.wait(
-      List.generate(workerCount, (_) => worker()),
-    );
-
-    if (firstError != null) {
-      throw Exception('Không thể tải segment: $firstError');
-    }
-
-    if (_cancelRequested.contains(downloadId)) {
-      throw const _DownloadCancelled();
-    }
-  }
 
   Future<void> _downloadSegment({
     required String downloadId,
@@ -932,10 +1046,7 @@ class AnimeDownloadService {
     Object? lastError;
 
     for (var attempt = 1; attempt <= _maxAttempts; attempt++) {
-      if (_cancelRequested.contains(downloadId)) {
-        throw const _DownloadCancelled();
-      }
-
+      _checkCancelled(downloadId);
       await _waitIfPaused(downloadId);
 
       try {
@@ -960,10 +1071,8 @@ class AnimeDownloadService {
 
         try {
           await for (final chunk in response.stream) {
-            if (_cancelRequested.contains(downloadId)) {
-              throw const _DownloadCancelled();
-            }
-
+            await _waitIfPaused(downloadId);
+            _checkCancelled(downloadId);
             sink.add(chunk);
           }
 
@@ -972,13 +1081,11 @@ class AnimeDownloadService {
           await sink.close();
         }
 
+        _checkCancelled(downloadId);
+
         if (!await temporaryFile.exists() ||
             await temporaryFile.length() == 0) {
           throw Exception('Segment tải về rỗng.');
-        }
-
-        if (_cancelRequested.contains(downloadId)) {
-          throw const _DownloadCancelled();
         }
 
         if (await destination.exists()) {
@@ -990,6 +1097,9 @@ class AnimeDownloadService {
       } on _DownloadCancelled {
         rethrow;
       } catch (e) {
+        // Client bị đóng do yêu cầu hủy thì không được retry.
+        _checkCancelled(downloadId);
+
         lastError = e;
 
         if (await temporaryFile.exists()) {
@@ -998,6 +1108,7 @@ class AnimeDownloadService {
 
         if (attempt < _maxAttempts) {
           await Future.delayed(Duration(seconds: attempt * 2));
+          _checkCancelled(downloadId);
         }
       }
     }
@@ -1005,6 +1116,378 @@ class AnimeDownloadService {
     throw Exception(
       'Đã thử tải segment $_maxAttempts lần nhưng thất bại: $lastError',
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // FFMPEG CLEANUP
+  // ---------------------------------------------------------------------------
+
+  Future<void> _cancelFfmpegSession({
+    required String downloadId,
+    required int? sessionId,
+    required Completer<dynamic> ffmpegCompleted,
+    required Future<void> Function() closePipeWriter,
+    required Future<void> Function() releasePipe,
+  }) async {
+    var callbackReceived = ffmpegCompleted.isCompleted;
+
+    if (sessionId != null && !callbackReceived) {
+      try {
+        await FFmpegKit.cancel(sessionId).timeout(
+          _ffmpegCancelTimeout,
+        );
+      } on TimeoutException {
+        debugPrint('FFmpeg cancel request timeout: $downloadId');
+      } catch (e) {
+        debugPrint('FFmpeg cancel error: $e');
+      }
+    }
+
+    await closePipeWriter();
+
+    if (!callbackReceived && sessionId != null) {
+      try {
+        await ffmpegCompleted.future.timeout(
+          _ffmpegCallbackTimeout,
+        );
+
+        callbackReceived = true;
+      } on TimeoutException {
+        callbackReceived = false;
+      } catch (e) {
+        debugPrint('FFmpeg callback error: $e');
+      }
+    }
+
+    await releasePipe();
+
+    if (!callbackReceived && sessionId != null) {
+      _preserveEpisodeDirectory.add(downloadId);
+
+      debugPrint(
+        'Không xác nhận được FFmpeg đã dừng. '
+            'Giữ lại file tạm: $downloadId',
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // DOWNLOAD + MERGE STREAMING
+  // ---------------------------------------------------------------------------
+
+  Future<void> _downloadAndMergeStreaming({
+    required String downloadId,
+    required http.Client client,
+    required Map<String, String> headers,
+    required List<_HlsSegment> segments,
+    required Directory segmentsDirectory,
+    required File videoFile,
+    required int initialCompleted,
+    required ValueChanged<int> onProgress,
+  }) async {
+    final temporaryVideo = File('${videoFile.path}.part');
+
+    if (await temporaryVideo.exists()) {
+      await temporaryVideo.delete();
+    }
+
+    String? pipePath;
+    IOSink? pipeSink;
+
+    var pipeWriterClosed = false;
+    var pipeReleased = false;
+    var completed = initialCompleted;
+    var nextIndex = 0;
+    var firstErrorRecorded = false;
+    Object? firstError;
+    var stopWorkers = false;
+    var ffmpegFinishedNormally = false;
+
+    final workerCount = segments.length < _maxConcurrentSegments
+        ? segments.length
+        : _maxConcurrentSegments;
+
+    dynamic ffmpegSession;
+    final ffmpegCompleted = Completer<dynamic>();
+
+    Future<void> closePipeWriter() async {
+      if (pipeWriterClosed) return;
+
+      pipeWriterClosed = true;
+
+      try {
+        await pipeSink?.flush();
+      } catch (_) {}
+
+      try {
+        await pipeSink?.close();
+      } catch (e) {
+        debugPrint('Không thể đóng FFmpeg pipe writer: $e');
+      }
+    }
+
+    Future<void> releasePipe() async {
+      await closePipeWriter();
+
+      if (pipeReleased || pipePath == null) return;
+
+      pipeReleased = true;
+
+      try {
+        await FFmpegKitConfig.closeFFmpegPipe(pipePath);
+      } catch (e) {
+        debugPrint('Không thể giải phóng FFmpeg pipe: $e');
+      }
+    }
+
+    Future<void> stopFfmpeg() async {
+      final sessionId = _ffmpegSessionIds[downloadId];
+
+      await _cancelFfmpegSession(
+        downloadId: downloadId,
+        sessionId: sessionId,
+        ffmpegCompleted: ffmpegCompleted,
+        closePipeWriter: closePipeWriter,
+        releasePipe: releasePipe,
+      );
+    }
+
+    try {
+      _checkCancelled(downloadId);
+
+      pipePath = await FFmpegKitConfig.registerNewFFmpegPipe();
+
+      if (pipePath == null || pipePath.isEmpty) {
+        throw Exception('Không thể tạo named pipe cho FFmpeg.');
+      }
+
+      _checkCancelled(downloadId);
+
+      final ffmpegLaunch = FFmpegKit.executeWithArgumentsAsync(
+        [
+          '-hide_banner',
+          '-loglevel',
+          'error',
+          '-y',
+          '-fflags',
+          '+genpts',
+          '-f',
+          'mpegts',
+          '-i',
+          pipePath,
+          '-map',
+          '0:v:0',
+          '-map',
+          '0:a?',
+          '-c',
+          'copy',
+          '-movflags',
+          '+faststart',
+          temporaryVideo.path,
+        ],
+            (session) {
+          if (!ffmpegCompleted.isCompleted) {
+            ffmpegCompleted.complete(session);
+          }
+        },
+      );
+
+      ffmpegSession = await ffmpegLaunch;
+
+      final sessionId = ffmpegSession.getSessionId();
+
+      if (sessionId is int) {
+        _ffmpegSessionIds[downloadId] = sessionId;
+      }
+
+      // Nếu người dùng hủy trong lúc FFmpeg đang khởi tạo,
+      // gửi lệnh hủy ngay sau khi lấy được session ID.
+      if (_cancelRequested.contains(downloadId)) {
+        if (sessionId is int) {
+          try {
+            await FFmpegKit.cancel(sessionId);
+          } catch (e) {
+            debugPrint('Không thể hủy FFmpeg vừa khởi tạo: $e');
+          }
+        }
+
+        throw const _DownloadCancelled();
+      }
+
+      _checkCancelled(downloadId);
+
+      pipeSink = File(pipePath).openWrite();
+
+      final writer = _OrderedPipeWriter(
+        sink: pipeSink,
+        downloadId: downloadId,
+        waitIfPaused: _waitIfPaused,
+        checkCancelled: _checkCancelled,
+      );
+
+      _updateProgress(
+        downloadId,
+        status: 'Đang tải và ghép video MP4...',
+        completed: initialCompleted,
+        total: segments.length,
+        isDownloading: true,
+        isPaused: false,
+      );
+
+      Future<void> worker() async {
+        while (true) {
+          await _waitIfPaused(downloadId);
+
+          if (stopWorkers || _cancelRequested.contains(downloadId)) {
+            return;
+          }
+
+          final currentIndex = nextIndex++;
+
+          if (currentIndex >= segments.length) {
+            return;
+          }
+
+          final segment = segments[currentIndex];
+
+          final destination = _segmentFile(
+            segmentsDirectory,
+            segment.index,
+          );
+
+          try {
+            final alreadyDownloaded =
+                await destination.exists() &&
+                    await destination.length() > 0;
+
+            if (!alreadyDownloaded) {
+              await _downloadSegment(
+                downloadId: downloadId,
+                client: client,
+                headers: headers,
+                segment: segment,
+                destination: destination,
+              );
+
+              if (!_cancelRequested.contains(downloadId)) {
+                completed++;
+                onProgress(completed);
+              }
+            }
+
+            _checkCancelled(downloadId);
+
+            await writer.add(destination, segment.index);
+          } on _DownloadCancelled {
+            return;
+          } catch (e) {
+            if (_cancelRequested.contains(downloadId)) {
+              return;
+            }
+
+            if (!firstErrorRecorded) {
+              firstErrorRecorded = true;
+              firstError = e;
+            }
+
+            stopWorkers = true;
+            return;
+          }
+        }
+      }
+
+      await Future.wait(
+        List.generate(workerCount, (_) => worker()),
+      );
+
+      _checkCancelled(downloadId);
+
+      if (firstErrorRecorded) {
+        throw Exception(
+          'Không thể tải hoặc chuyển segment vào FFmpeg: $firstError',
+        );
+      }
+
+      await writer.finish(segments.length);
+
+      _checkCancelled(downloadId);
+
+      await closePipeWriter();
+
+      // Chờ FFmpeg hoàn tất hoặc nhận tín hiệu hủy.
+      // Không phải chờ hết thời gian 3 phút nếu người dùng đã hủy.
+      final cancelCompleter = _cancelCompleters[downloadId];
+
+      final completedSession = await Future.any<dynamic>([
+        ffmpegCompleted.future.timeout(
+          _ffmpegFinishTimeout,
+          onTimeout: () {
+            throw TimeoutException(
+              'FFmpeg không hoàn tất quá thời gian chờ.',
+            );
+          },
+        ),
+        if (cancelCompleter != null)
+          cancelCompleter.future.then<dynamic>((_) {
+            throw const _DownloadCancelled();
+          }),
+      ]);
+
+      _checkCancelled(downloadId);
+
+      final returnCode = await completedSession.getReturnCode();
+      final returnCodeValue = returnCode?.getValue();
+
+      if (returnCodeValue != 0) {
+        final output = await completedSession.getOutput();
+
+        throw Exception(
+          'FFmpeg không thể ghép video. '
+              '${output?.trim().isNotEmpty == true ? output : returnCode}',
+        );
+      }
+
+      _checkCancelled(downloadId);
+
+      if (!await temporaryVideo.exists() ||
+          await temporaryVideo.length() < 1024) {
+        throw Exception('File MP4 sau khi ghép không hợp lệ.');
+      }
+
+      _checkCancelled(downloadId);
+
+      if (await videoFile.exists()) {
+        await videoFile.delete();
+      }
+
+      await temporaryVideo.rename(videoFile.path);
+
+      ffmpegFinishedNormally = true;
+
+      await releasePipe();
+    } catch (_) {
+      stopWorkers = true;
+
+      await stopFfmpeg();
+
+      if (!_preserveEpisodeDirectory.contains(downloadId) &&
+          await temporaryVideo.exists()) {
+        try {
+          await temporaryVideo.delete();
+        } catch (e) {
+          debugPrint('Không thể xóa file MP4 tạm: $e');
+        }
+      }
+
+      rethrow;
+    } finally {
+      if (!ffmpegFinishedNormally &&
+          !_preserveEpisodeDirectory.contains(downloadId)) {
+        await releasePipe();
+      }
+
+      _ffmpegSessionIds.remove(downloadId);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1052,9 +1535,8 @@ class AnimeDownloadService {
 
       if (!line.startsWith('#EXT-X-STREAM-INF:')) continue;
 
-      final bandwidthMatch = RegExp(
-        r'BANDWIDTH=(\d+)',
-      ).firstMatch(line);
+      final bandwidthMatch =
+      RegExp(r'BANDWIDTH=(\d+)').firstMatch(line);
 
       final bandwidth =
           int.tryParse(bandwidthMatch?.group(1) ?? '') ?? 0;
@@ -1137,36 +1619,6 @@ class AnimeDownloadService {
 
     return File(
       '${directory.path}${Platform.pathSeparator}$name',
-    );
-  }
-
-  Future<void> _writeConcatFile(
-      File concatFile,
-      List<_HlsSegment> segments,
-      Directory segmentsDirectory,
-      ) async {
-    final buffer = StringBuffer();
-
-    for (final segment in segments) {
-      final file = _segmentFile(
-        segmentsDirectory,
-        segment.index,
-      );
-
-      if (!await file.exists() || await file.length() == 0) {
-        throw Exception('Thiếu segment ${segment.index}.');
-      }
-
-      final escapedPath = file.path
-          .replaceAll(r'\', r'\\')
-          .replaceAll("'", r"\'");
-
-      buffer.writeln("file '$escapedPath'");
-    }
-
-    await concatFile.writeAsString(
-      buffer.toString(),
-      flush: true,
     );
   }
 

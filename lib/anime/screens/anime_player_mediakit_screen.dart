@@ -68,6 +68,8 @@ class _AnimePlayerMediaKitScreenState
   static const Duration _controlsHideDelay = Duration(seconds: 2);
   static const int _skipIntroSeconds = 90;
 
+  static const int _episodeGridColumnCount = 5;
+
   static const List<double> _playbackRates = [
     0.5,
     0.75,
@@ -1484,14 +1486,14 @@ class _AnimePlayerMediaKitScreenState
   }
 
   // ============================================================
-  // EPISODE LIST
+  // EPISODE GRID
   // ============================================================
 
   Widget _buildEpisodeList() {
     final colorScheme = Theme.of(context).colorScheme;
 
     return SizedBox(
-      height: 100,
+      height: 180,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1510,73 +1512,60 @@ class _AnimePlayerMediaKitScreenState
             ),
           ),
           Expanded(
-            child: ListView.builder(
-              scrollDirection: Axis.horizontal,
+            child: GridView.builder(
               padding: const EdgeInsets.symmetric(
                 horizontal: 12,
                 vertical: 2,
               ),
               itemCount: _episodes.length,
+              gridDelegate:
+              const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: _episodeGridColumnCount,
+                crossAxisSpacing: 6,
+                mainAxisSpacing: 6,
+                childAspectRatio: 1.35,
+              ),
               itemBuilder: (context, index) {
                 final episode = _episodes[index];
                 final isCurrent = index == _currentEpisodeIndex;
 
-                return Padding(
-                  padding: const EdgeInsets.only(right: 6),
-                  child: Material(
-                    color: isCurrent
-                        ? colorScheme.primaryContainer
-                        : colorScheme.surfaceContainerHighest,
+                return Material(
+                  color: isCurrent
+                      ? colorScheme.primaryContainer
+                      : colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(6),
+                  child: InkWell(
                     borderRadius: BorderRadius.circular(6),
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(6),
-                      onTap: _loading ? null : () => _loadEpisode(index),
-                      child: Container(
-                        width: 76,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 5,
-                          vertical: 4,
+                    onTap: _loading ? null : () => _loadEpisode(index),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 4,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(
+                          color: isCurrent
+                              ? colorScheme.primary
+                              : colorScheme.outlineVariant,
                         ),
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(
-                            color: isCurrent
-                                ? colorScheme.primary
-                                : colorScheme.outlineVariant,
+                      ),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            episode.title,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: isCurrent
+                                  ? colorScheme.onPrimaryContainer
+                                  : colorScheme.onSurface,
+                            ),
                           ),
-                        ),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Text(
-                              'Tập ${episode.number}',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
-                                color: isCurrent
-                                    ? colorScheme.onPrimaryContainer
-                                    : colorScheme.onSurface,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              episode.title,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                fontSize: 9,
-                                height: 1.1,
-                                color: isCurrent
-                                    ? colorScheme.onPrimaryContainer
-                                    .withValues(alpha: 0.8)
-                                    : colorScheme.onSurfaceVariant,
-                              ),
-                            ),
-                          ],
-                        ),
+                        ],
                       ),
                     ),
                   ),
